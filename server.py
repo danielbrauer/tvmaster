@@ -150,8 +150,12 @@ def load_wol_targets(path: Path) -> dict:
 tailscale_app = Flask("tailscale")
 
 
-@tailscale_app.route("/wol", methods=["POST"])
+@tailscale_app.route("/wol", methods=["GET", "POST"])
 def wol_handler():
+    # GET is used by tailscale serve health checks
+    if request.method == "GET":
+        return jsonify(ok=True), 200
+
     # Verify request came through tailscale serve
     ts_user = request.headers.get("Tailscale-User-Login")
     if not ts_user:
