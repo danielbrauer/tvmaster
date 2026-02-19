@@ -1,6 +1,6 @@
 [Unit]
-Description=netmaster CEC + WoL hub
-After=network.target tailscaled.service
+Description=netmaster CEC TV control
+After=network.target
 
 [Service]
 ExecStart=/usr/bin/python3 /home/YOUR_USER/netmaster/server.py
