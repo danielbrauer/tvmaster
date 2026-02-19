@@ -27,7 +27,6 @@ Usage:
 import argparse
 import json
 import logging
-import os
 import socket
 import struct
 import subprocess
@@ -249,9 +248,6 @@ def main():
 
     global wol_targets
     wol_targets = load_wol_targets(args.config)
-
-    # Suppress Werkzeug reloader banner in threaded mode
-    os.environ["WERKZEUG_RUN_MAIN"] = "true"
 
     print(f"Tailscale app: {TAILSCALE_HOST}:{args.ts_port}")
     print(f"LAN app:       {args.lan_host}:{args.lan_port}")
