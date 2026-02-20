@@ -3,7 +3,7 @@ Description=tvmaster CEC TV control
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 /home/YOUR_USER/tvmaster/server.py
+ExecStart=/home/YOUR_USER/tvmaster/venv/bin/python /home/YOUR_USER/tvmaster/server.py
 WorkingDirectory=/home/YOUR_USER/tvmaster
 Restart=on-failure
 RestartSec=5

@@ -152,6 +152,8 @@ def tv_status_handler():
 @app.route("/tv/on", methods=["POST"])
 def tv_on_handler():
     hdmi_input = request.json.get("input") if request.is_json else None
+    if hdmi_input is not None:
+        hdmi_input = int(hdmi_input)
     ok, message = tv_on(hdmi_input)
     status = 200 if ok else 500
     return jsonify(ok=ok, message=message), status
