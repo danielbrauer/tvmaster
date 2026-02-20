@@ -6,7 +6,7 @@ Exposes TV power control via HDMI-CEC as HTTP endpoints on the local network.
 
 Endpoints:
   GET  /tv/status        - Returns TV power state
-  POST /tv/on            - Turn TV on via CEC
+  POST /tv/on            - Turn TV on via CEC (optional JSON body: {"input": 1-4})
   POST /tv/off           - Turn TV off via CEC
 
 Usage:
@@ -19,7 +19,7 @@ import logging
 import os
 import subprocess
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 # ---------------------------------------------------------------------------
 # Config
@@ -56,17 +56,21 @@ def cec_send(command: str) -> tuple[bool, str]:
         return False, "cec-client timed out"
 
 
-def tv_on() -> tuple[bool, str]:
+def switch_input(hdmi_input: int) -> tuple[bool, str]:
+    """Switch the TV to the given HDMI input (1-4)."""
+    physical_address = f"{hdmi_input}0:00"
+    return cec_send(f"tx 1F:82:{physical_address}")
+
+
+def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
     ok, output = cec_send(f"on {CEC_DEVICE}")
+    if ok and hdmi_input is not None:
+        switch_input(hdmi_input)
     return ok, "TV turned on" if ok else output
 
 
 def tv_off() -> tuple[bool, str]:
-    # Switch to this device first — standby is ignored if the Pi isn't the active source
-    cec_send("as")
     ok, output = cec_send(f"standby {CEC_DEVICE}")
-    # Relinquish active source so the TV doesn't wake up on the Pi's input
-    cec_send("is")
     return ok, "TV turned off" if ok else output
 
 
@@ -101,7 +105,8 @@ def tv_status_handler():
 
 @app.route("/tv/on", methods=["POST"])
 def tv_on_handler():
-    ok, message = tv_on()
+    hdmi_input = request.json.get("input") if request.is_json else None
+    ok, message = tv_on(hdmi_input)
     status = 200 if ok else 500
     return jsonify(ok=ok, message=message), status
 
