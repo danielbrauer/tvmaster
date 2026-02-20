@@ -95,7 +95,7 @@ def tv_status() -> tuple[bool, str]:
 # Flask app (TV/CEC — network-accessible)
 # ---------------------------------------------------------------------------
 
-app = Flask("netmaster")
+app = Flask("tvmaster")
 
 
 @app.route("/tv/status", methods=["GET"])

@@ -1,4 +1,4 @@
-# netmaster
+# tvmaster
 
 A Raspberry Pi TV control hub that exposes HDMI-CEC commands as HTTP endpoints via Flask.
 
@@ -47,9 +47,9 @@ Turn the TV off (standby).
 
 ## Running as a systemd service
 
-Copy `netmaster.service.example` to `/etc/systemd/system/netmaster.service` and replace `YOUR_USER` with your username, then:
+Copy `tvmaster.service.example` to `/etc/systemd/system/tvmaster.service` and replace `YOUR_USER` with your username, then:
 
 ```
 sudo systemctl daemon-reload
-sudo systemctl enable --now netmaster
+sudo systemctl enable --now tvmaster
 ```
