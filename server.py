@@ -32,7 +32,8 @@ CEC_DEVICE = "0"  # CEC logical address for TV is typically 0
 
 # Set log level via LOG_LEVEL env var (e.g. LOG_LEVEL=DEBUG)
 log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
-logging.getLogger("werkzeug").setLevel(getattr(logging, log_level, logging.WARNING))
+logging.basicConfig(level=getattr(logging, log_level, logging.WARNING))
+log = logging.getLogger("tvmaster")
 
 # ---------------------------------------------------------------------------
 # CEC helpers
@@ -41,6 +42,7 @@ logging.getLogger("werkzeug").setLevel(getattr(logging, log_level, logging.WARNI
 
 def cec_send(command: str) -> tuple[bool, str]:
     """Send a command via cec-client. Returns (success, output)."""
+    log.debug("cec_send: %s", command)
     try:
         result = subprocess.run(
             ["cec-client", "-s", "-d", "1"],
@@ -49,10 +51,15 @@ def cec_send(command: str) -> tuple[bool, str]:
             text=True,
             timeout=10,
         )
+        if result.returncode != 0:
+            log.debug("cec-client failed (rc=%d): stdout=%s stderr=%s",
+                       result.returncode, result.stdout.strip(), result.stderr.strip())
         return result.returncode == 0, result.stdout.strip()
     except FileNotFoundError:
+        log.debug("cec-client not found")
         return False, "cec-client not found"
     except subprocess.TimeoutExpired:
+        log.debug("cec-client timed out")
         return False, "cec-client timed out"
 
 

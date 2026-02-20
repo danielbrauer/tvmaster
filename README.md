@@ -39,7 +39,13 @@ Returns the TV power state.
 
 ### `POST /tv/on`
 
-Turn the TV on.
+Turn the TV on. Optionally pass a JSON body to switch to a specific HDMI input:
+
+```json
+{ "input": 1 }
+```
+
+`input` (1-4) corresponds to HDMI port number. If omitted, the TV turns on without changing input.
 
 ### `POST /tv/off`
 
