@@ -17,8 +17,9 @@ Usage:
 import argparse
 import logging
 import os
-import subprocess
+import threading
 
+import cec
 from flask import Flask, jsonify, request
 
 # ---------------------------------------------------------------------------
@@ -28,7 +29,7 @@ from flask import Flask, jsonify, request
 LAN_HOST = "0.0.0.0"
 LAN_PORT = 8080
 
-CEC_DEVICE = "0"  # CEC logical address for TV is typically 0
+CEC_OPCODE_ACTIVE_SOURCE = 0x82
 
 # Set log level via LOG_LEVEL env var (e.g. LOG_LEVEL=DEBUG)
 log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
@@ -36,66 +37,102 @@ logging.basicConfig(level=getattr(logging, log_level, logging.WARNING))
 log = logging.getLogger("tvmaster")
 
 # ---------------------------------------------------------------------------
+# CEC state
+# ---------------------------------------------------------------------------
+
+_cec_lock = threading.Lock()
+_cec_ready = False
+_tv = None
+
+# ---------------------------------------------------------------------------
+# CEC init
+# ---------------------------------------------------------------------------
+
+
+def init_cec():
+    """Initialize the CEC adapter (once at startup)."""
+    global _cec_ready, _tv
+
+    adapters = cec.list_adapters()
+    if not adapters:
+        log.error("No CEC adapters found")
+        return
+
+    log.info("CEC adapters: %s", adapters)
+    cec.init(adapters[0])
+
+    _tv = cec.Device(cec.CECDEVICE_TV)
+    _cec_ready = True
+    log.info("CEC initialized, TV device ready")
+
+
+# ---------------------------------------------------------------------------
 # CEC helpers
 # ---------------------------------------------------------------------------
 
 
-def cec_send(command: str) -> tuple[bool, str]:
-    """Send a command via cec-client. Returns (success, output)."""
-    log.debug("cec_send: %s", command)
-    try:
-        result = subprocess.run(
-            ["cec-client", "-s", "-d", "1"],
-            input=command + "\n",
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            log.debug("cec-client failed (rc=%d): stdout=%s stderr=%s",
-                       result.returncode, result.stdout.strip(), result.stderr.strip())
-        return result.returncode == 0, result.stdout.strip()
-    except FileNotFoundError:
-        log.debug("cec-client not found")
-        return False, "cec-client not found"
-    except subprocess.TimeoutExpired:
-        log.debug("cec-client timed out")
-        return False, "cec-client timed out"
-
-
 def switch_input(hdmi_input: int) -> tuple[bool, str]:
     """Switch the TV to the given HDMI input (1-4)."""
-    physical_address = f"{hdmi_input}0:00"
-    return cec_send(f"tx 1F:82:{physical_address}")
+    if not _cec_ready:
+        return False, "CEC not initialized"
+    with _cec_lock:
+        try:
+            log.debug("switch_input: %d", hdmi_input)
+            cec.transmit(
+                cec.CECDEVICE_BROADCAST,
+                CEC_OPCODE_ACTIVE_SOURCE,
+                bytes([hdmi_input << 4, 0x00]),
+            )
+            return True, f"Switched to HDMI {hdmi_input}"
+        except Exception as e:
+            log.error("switch_input failed: %s", e)
+            return False, str(e)
 
 
 def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
-    ok, output = cec_send(f"on {CEC_DEVICE}")
-    if ok and hdmi_input is not None:
-        switch_input(hdmi_input)
-    return ok, "TV turned on" if ok else output
+    if not _cec_ready:
+        return False, "CEC not initialized"
+    with _cec_lock:
+        try:
+            log.debug("tv_on: hdmi_input=%s", hdmi_input)
+            _tv.power_on()
+            if hdmi_input is not None:
+                cec.transmit(
+                    cec.CECDEVICE_BROADCAST,
+                    CEC_OPCODE_ACTIVE_SOURCE,
+                    bytes([hdmi_input << 4, 0x00]),
+                )
+            return True, "TV turned on"
+        except Exception as e:
+            log.error("tv_on failed: %s", e)
+            return False, str(e)
 
 
 def tv_off() -> tuple[bool, str]:
-    # Switch to this device first — standby is ignored if the Pi isn't the active source
-    cec_send("as")
-    ok, output = cec_send(f"standby {CEC_DEVICE}")
-    return ok, "TV turned off" if ok else output
+    if not _cec_ready:
+        return False, "CEC not initialized"
+    with _cec_lock:
+        try:
+            log.debug("tv_off")
+            cec.set_active_source()
+            _tv.standby()
+            return True, "TV turned off"
+        except Exception as e:
+            log.error("tv_off failed: %s", e)
+            return False, str(e)
 
 
 def tv_status() -> tuple[bool, str]:
-    """Query TV power status. Returns (success, status_string)."""
-    ok, output = cec_send(f"pow {CEC_DEVICE}")
-    if not ok:
-        return False, output
-    for line in output.splitlines():
-        lower = line.lower()
-        if "power status:" in lower:
-            if "on" in lower.split("power status:")[-1]:
-                return True, "on"
-            else:
-                return True, "off"
-    return False, f"could not parse power status: {output}"
+    """Query TV power status."""
+    if not _cec_ready:
+        return False, "CEC not initialized"
+    with _cec_lock:
+        try:
+            log.debug("tv_status")
+            return True, "on" if _tv.is_on() else "off"
+        except Exception as e:
+            log.error("tv_status failed: %s", e)
+            return False, str(e)
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +183,8 @@ def main():
         help=f"LAN bind address (default {LAN_HOST})",
     )
     args = parser.parse_args()
+
+    init_cec()
 
     print(f"LAN app: {args.lan_host}:{args.lan_port}")
 

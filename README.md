@@ -4,9 +4,11 @@ A Raspberry Pi TV control hub that exposes HDMI-CEC commands as HTTP endpoints v
 
 ## Requirements
 
-- Python 3.6+
+- Python 3.10+
 - Flask (`pip install flask`)
-- `cec-client` (e.g. `sudo apt install cec-utils`)
+- `cec` Python library — either:
+  - `sudo apt install python3-cec` (system package), or
+  - `pip install cec` (requires `sudo apt install libcec-dev build-essential python3-dev`)
 
 ## Configuration
 
