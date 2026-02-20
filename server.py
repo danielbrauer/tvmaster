@@ -70,6 +70,8 @@ def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
 
 
 def tv_off() -> tuple[bool, str]:
+    # Switch to this device first — standby is ignored if the Pi isn't the active source
+    cec_send("as")
     ok, output = cec_send(f"standby {CEC_DEVICE}")
     return ok, "TV turned off" if ok else output
 
