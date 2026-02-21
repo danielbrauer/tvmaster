@@ -48,15 +48,38 @@ log = logging.getLogger("tvmaster")
 _cec_lock = threading.Lock()
 _cec_ready = False
 _tv = None
+_own_address = None
 
 # ---------------------------------------------------------------------------
 # CEC init
 # ---------------------------------------------------------------------------
 
 
+def _detect_own_address() -> int:
+    """Detect our CEC logical address after initialization.
+
+    python-cec registers as a recording device. libcec claims the first
+    available address from {1, 2, 9}. list_devices() returns other devices
+    on the bus, so the first recording address not occupied by another
+    device matches libcec's allocation order.
+    """
+    candidates = [
+        cec.CECDEVICE_RECORDINGDEVICE1,
+        cec.CECDEVICE_RECORDINGDEVICE2,
+        cec.CECDEVICE_RECORDINGDEVICE3,
+    ]
+    remote = cec.list_devices()
+    log.debug("Remote CEC devices: %s", list(remote.keys()))
+    for addr in candidates:
+        if addr not in remote:
+            return addr
+    log.warning("All recording device addresses occupied, defaulting to RECORDINGDEVICE1")
+    return cec.CECDEVICE_RECORDINGDEVICE1
+
+
 def init_cec():
     """Initialize the CEC adapter (once at startup)."""
-    global _cec_ready, _tv
+    global _cec_ready, _tv, _own_address
 
     adapters = cec.list_adapters()
     if not adapters:
@@ -66,9 +89,10 @@ def init_cec():
     log.info("CEC adapters: %s", adapters)
     cec.init(adapters[0])
 
+    _own_address = _detect_own_address()
     _tv = cec.Device(cec.CECDEVICE_TV)
     _cec_ready = True
-    log.info("CEC initialized, TV device ready")
+    log.info("CEC initialized, own address: %d, TV device ready", _own_address)
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +161,7 @@ def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
 
 
 def _is_active_source() -> bool:
-    return cec.is_active_source(cec.CECDEVICE_RECORDINGDEVICE1)
+    return cec.is_active_source(_own_address)
 
 
 def tv_off() -> tuple[bool, str]:
