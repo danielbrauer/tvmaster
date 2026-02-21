@@ -18,6 +18,7 @@ import argparse
 import logging
 import os
 import threading
+import time
 
 import cec
 from flask import Flask, jsonify, request
@@ -30,6 +31,8 @@ LAN_HOST = "0.0.0.0"
 LAN_PORT = 8080
 
 CEC_OPCODE_ACTIVE_SOURCE = 0x82
+MAX_RETRIES = 3
+RETRY_DELAY = 1.0  # seconds between status checks
 
 # Set log level via LOG_LEVEL env var (e.g. LOG_LEVEL=DEBUG)
 log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
@@ -95,7 +98,14 @@ def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
     with _cec_lock:
         try:
             log.debug("tv_on: hdmi_input=%s", hdmi_input)
-            _tv.power_on()
+            for attempt in range(MAX_RETRIES):
+                _tv.power_on()
+                time.sleep(RETRY_DELAY)
+                if _tv.is_on():
+                    break
+                log.warning("tv_on: attempt %d — TV still off, retrying", attempt + 1)
+            else:
+                return False, "TV did not turn on after retries"
             if hdmi_input is not None:
                 cec.transmit(
                     cec.CECDEVICE_BROADCAST,
@@ -114,8 +124,15 @@ def tv_off() -> tuple[bool, str]:
     with _cec_lock:
         try:
             log.debug("tv_off")
-            cec.set_active_source()
-            _tv.standby()
+            for attempt in range(MAX_RETRIES):
+                cec.set_active_source()
+                _tv.standby()
+                time.sleep(RETRY_DELAY)
+                if not _tv.is_on():
+                    break
+                log.warning("tv_off: attempt %d — TV still on, retrying", attempt + 1)
+            else:
+                return False, "TV did not turn off after retries"
             return True, "TV turned off"
         except Exception as e:
             log.error("tv_off failed: %s", e)
