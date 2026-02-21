@@ -32,9 +32,19 @@ LAN_HOST = "0.0.0.0"
 LAN_PORT = 8080
 
 CEC_OPCODE_ACTIVE_SOURCE = 0x82
-MAX_RETRIES = 3
-RETRY_DELAY = 2.0  # seconds between status checks
-POWER_ON_DELAY = 10.0  # seconds to wait after power-on commands
+CEC_OPCODE_GIVE_DEVICE_POWER_STATUS = 0x8F
+CEC_OPCODE_REPORT_POWER_STATUS = 0x90
+
+POWER_STATUS_ON = 0x00
+POWER_STATUS_STANDBY = 0x01
+POWER_STATUS_TRANSITION_TO_ON = 0x02
+POWER_STATUS_TRANSITION_TO_STANDBY = 0x03
+
+MAX_RETRIES = 3  # for active-source retries only
+POWER_QUERY_INTERVAL = 1.0    # seconds between status queries
+POWER_ON_TIMEOUT = 15.0       # total timeout for power-on
+POWER_OFF_TIMEOUT = 8.0       # total timeout for power-off
+COMMAND_RESEND_INTERVAL = 5   # re-send original command every N query cycles
 
 # Set log level via LOG_LEVEL env var (e.g. LOG_LEVEL=DEBUG)
 log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
@@ -49,6 +59,47 @@ _cec_lock = threading.Lock()
 _cec_ready = False
 _tv = None
 _own_address = None
+
+
+class _PowerStatusState:
+    """Thread-safe container for the latest Report Power Status byte."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._event = threading.Event()
+        self._status: int | None = None
+
+    def clear(self):
+        with self._lock:
+            self._status = None
+            self._event.clear()
+
+    def set(self, status: int):
+        with self._lock:
+            self._status = status
+            self._event.set()
+
+    def wait(self, timeout: float) -> int | None:
+        """Wait up to *timeout* seconds for a status byte. Returns the byte or None."""
+        if self._event.wait(timeout):
+            with self._lock:
+                return self._status
+        return None
+
+
+_power_status = _PowerStatusState()
+
+
+def _cec_command_callback(event, command):
+    """CEC command callback — filters for Report Power Status from the TV."""
+    if (
+        command["opcode"] == CEC_OPCODE_REPORT_POWER_STATUS
+        and command["initiator"] == cec.CECDEVICE_TV
+    ):
+        status = command["parameters"][0] if command["parameters"] else None
+        if status is not None:
+            log.debug("CEC callback: Report Power Status = 0x%02X", status)
+            _power_status.set(status)
 
 # ---------------------------------------------------------------------------
 # CEC init
@@ -88,6 +139,7 @@ def init_cec():
 
     log.info("CEC adapters: %s", adapters)
     cec.init(adapters[0])
+    cec.add_callback(_cec_command_callback, cec.EVENT_COMMAND)
 
     _own_address = _detect_own_address()
     _tv = cec.Device(cec.CECDEVICE_TV)
@@ -100,22 +152,54 @@ def init_cec():
 # ---------------------------------------------------------------------------
 
 
-def _cec_retry(name: str, command: Callable, check: Callable[[], bool], delay: float = RETRY_DELAY) -> bool:
-    """Send a CEC command and retry until check() returns True.
+def _wait_for_power_status(
+    target: set[int],
+    timeout: float,
+    command: Callable | None = None,
+) -> bool:
+    """Poll TV power status via CEC callback until it matches *target*.
 
     Must be called while holding _cec_lock.
+
+    Sends ``Give Device Power Status`` (0x8F) every POWER_QUERY_INTERVAL and
+    listens for ``Report Power Status`` (0x90) via the async callback. Every
+    COMMAND_RESEND_INTERVAL cycles, re-sends *command* (e.g. power_on/standby)
+    in case the TV missed it.
     """
-    for attempt in range(MAX_RETRIES):
-        log.debug("%s: attempt %d — sending command", name, attempt + 1)
-        command()
-        log.debug("%s: attempt %d — waiting %.1fs", name, attempt + 1, delay)
-        time.sleep(delay)
-        ok = check()
-        log.debug("%s: attempt %d — check=%s", name, attempt + 1, ok)
-        if ok:
+    deadline = time.monotonic() + timeout
+    cycle = 0
+    while time.monotonic() < deadline:
+        cycle += 1
+
+        # Re-send the original command periodically
+        if command and cycle % COMMAND_RESEND_INTERVAL == 0:
+            log.debug("_wait_for_power_status: re-sending command (cycle %d)", cycle)
+            command()
+
+        # Ask the TV for its power status
+        _power_status.clear()
+        cec.transmit(cec.CECDEVICE_TV, CEC_OPCODE_GIVE_DEVICE_POWER_STATUS, bytes())
+        log.debug("_wait_for_power_status: sent Give Device Power Status (cycle %d)", cycle)
+
+        remaining = deadline - time.monotonic()
+        wait_time = min(POWER_QUERY_INTERVAL, max(remaining, 0))
+        status = _power_status.wait(wait_time)
+
+        if status is None:
+            log.debug("_wait_for_power_status: no response (cycle %d)", cycle)
+            continue
+
+        if status in target:
+            log.debug("_wait_for_power_status: target reached (0x%02X, cycle %d)", status, cycle)
             return True
-        log.warning("%s: attempt %d — check failed, retrying", name, attempt + 1)
-    log.error("%s: failed after %d attempts", name, MAX_RETRIES)
+
+        if status in (POWER_STATUS_TRANSITION_TO_ON, POWER_STATUS_TRANSITION_TO_STANDBY):
+            log.debug("_wait_for_power_status: TV in transition (0x%02X, cycle %d)", status, cycle)
+            continue
+
+        log.debug("_wait_for_power_status: status 0x%02X not in target (cycle %d)", status, cycle)
+
+    log.warning("_wait_for_power_status: timed out after %.1fs", timeout)
     return False
 
 
@@ -131,29 +215,28 @@ def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
                     CEC_OPCODE_ACTIVE_SOURCE,
                     bytes([hdmi_input << 4, 0x00]),
                 )
-            # Optimistic: fire all commands in quick succession
-            log.debug("tv_on: optimistic power_on" + (f" + switch to HDMI {hdmi_input}" if transmit else ""))
+            # Send power-on (and active source if requested)
+            log.debug("tv_on: power_on" + (f" + switch to HDMI {hdmi_input}" if transmit else ""))
             _tv.power_on()
             if transmit:
                 transmit()
-            time.sleep(POWER_ON_DELAY)
-            # Check final state, work backwards from there
-            if transmit and _is_active_source() and _tv.is_on():
-                log.debug("tv_on: success on first try")
-                return True, "TV turned on"
-            if not transmit and _tv.is_on():
-                log.debug("tv_on: success on first try")
-                return True, "TV turned on"
-            # Troubleshoot: which stage failed?
-            log.warning("tv_on: not fully successful after optimistic attempt")
-            if not _tv.is_on():
-                log.warning("tv_on: TV not on, retrying power_on")
-                if not _cec_retry("power_on", _tv.power_on, _tv.is_on, POWER_ON_DELAY):
-                    return False, "TV did not turn on after retries"
+
+            # Wait for TV to report power on
+            if not _wait_for_power_status({POWER_STATUS_ON}, POWER_ON_TIMEOUT, command=_tv.power_on):
+                return False, "TV did not turn on"
+
+            # Verify active source if input was requested
             if transmit and not _is_active_source():
                 log.warning("tv_on: not active source, retrying switch_input")
-                if not _cec_retry("switch_input", transmit, _is_active_source):
+                for attempt in range(MAX_RETRIES):
+                    transmit()
+                    time.sleep(POWER_QUERY_INTERVAL)
+                    if _is_active_source():
+                        break
+                    log.warning("tv_on: switch_input attempt %d failed", attempt + 1)
+                else:
                     return False, "Input switch failed after retries"
+
             return True, "TV turned on"
         except Exception as e:
             log.error("tv_on failed: %s", e)
@@ -169,22 +252,13 @@ def tv_off() -> tuple[bool, str]:
         return False, "CEC not initialized"
     with _cec_lock:
         try:
-            # Optimistic: fire both commands in quick succession
-            log.debug("tv_off: optimistic set_active_source + standby")
+            log.debug("tv_off: set_active_source + standby")
             cec.set_active_source()
             _tv.standby()
-            time.sleep(RETRY_DELAY)
-            if not _tv.is_on():
-                log.debug("tv_off: success on first try")
-                return True, "TV turned off"
-            # Troubleshoot: which stage failed?
-            log.warning("tv_off: TV still on after optimistic attempt")
-            if not _is_active_source():
-                log.warning("tv_off: not active source, retrying set_active_source")
-                if not _cec_retry("set_active_source", cec.set_active_source, _is_active_source):
-                    return False, "set_active_source failed after retries"
-            if not _cec_retry("standby", _tv.standby, lambda: not _tv.is_on()):
-                return False, "TV did not turn off after retries"
+
+            if not _wait_for_power_status({POWER_STATUS_STANDBY}, POWER_OFF_TIMEOUT, command=_tv.standby):
+                return False, "TV did not turn off"
+
             return True, "TV turned off"
         except Exception as e:
             log.error("tv_off failed: %s", e)
