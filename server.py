@@ -33,8 +33,8 @@ LAN_PORT = 8080
 
 CEC_OPCODE_ACTIVE_SOURCE = 0x82
 MAX_RETRIES = 3
-RETRY_DELAY = 1.0  # seconds between status checks
-POWER_ON_DELAY = 6.0  # seconds to wait after power-on commands
+RETRY_DELAY = 2.0  # seconds between status checks
+POWER_ON_DELAY = 10.0  # seconds to wait after power-on commands
 
 # Set log level via LOG_LEVEL env var (e.g. LOG_LEVEL=DEBUG)
 log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
