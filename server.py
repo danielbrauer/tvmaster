@@ -99,19 +99,26 @@ def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
         try:
             log.debug("tv_on: hdmi_input=%s", hdmi_input)
             for attempt in range(MAX_RETRIES):
+                log.debug("tv_on: attempt %d — sending power_on", attempt + 1)
                 _tv.power_on()
+                log.debug("tv_on: attempt %d — waiting %.1fs for state change", attempt + 1, RETRY_DELAY)
                 time.sleep(RETRY_DELAY)
-                if _tv.is_on():
+                is_on = _tv.is_on()
+                log.debug("tv_on: attempt %d — is_on=%s", attempt + 1, is_on)
+                if is_on:
                     break
                 log.warning("tv_on: attempt %d — TV still off, retrying", attempt + 1)
             else:
+                log.error("tv_on: TV still off after %d attempts", MAX_RETRIES)
                 return False, "TV did not turn on after retries"
             if hdmi_input is not None:
+                log.debug("tv_on: switching to HDMI %d", hdmi_input)
                 cec.transmit(
                     cec.CECDEVICE_BROADCAST,
                     CEC_OPCODE_ACTIVE_SOURCE,
                     bytes([hdmi_input << 4, 0x00]),
                 )
+            log.debug("tv_on: success")
             return True, "TV turned on"
         except Exception as e:
             log.error("tv_on failed: %s", e)
@@ -123,16 +130,23 @@ def tv_off() -> tuple[bool, str]:
         return False, "CEC not initialized"
     with _cec_lock:
         try:
-            log.debug("tv_off")
+            log.debug("tv_off: starting")
             for attempt in range(MAX_RETRIES):
+                log.debug("tv_off: attempt %d — sending set_active_source", attempt + 1)
                 cec.set_active_source()
+                log.debug("tv_off: attempt %d — sending standby", attempt + 1)
                 _tv.standby()
+                log.debug("tv_off: attempt %d — waiting %.1fs for state change", attempt + 1, RETRY_DELAY)
                 time.sleep(RETRY_DELAY)
-                if not _tv.is_on():
+                is_on = _tv.is_on()
+                log.debug("tv_off: attempt %d — is_on=%s", attempt + 1, is_on)
+                if not is_on:
                     break
                 log.warning("tv_off: attempt %d — TV still on, retrying", attempt + 1)
             else:
+                log.error("tv_off: TV still on after %d attempts", MAX_RETRIES)
                 return False, "TV did not turn off after retries"
+            log.debug("tv_off: success")
             return True, "TV turned off"
         except Exception as e:
             log.error("tv_off failed: %s", e)
