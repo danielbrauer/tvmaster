@@ -19,7 +19,6 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable
 
 import cec
 from flask import Flask, jsonify, request
@@ -40,11 +39,9 @@ POWER_STATUS_STANDBY = 0x01
 POWER_STATUS_TRANSITION_TO_ON = 0x02
 POWER_STATUS_TRANSITION_TO_STANDBY = 0x03
 
-MAX_RETRIES = 3  # for active-source retries only
 POWER_QUERY_INTERVAL = 1.0    # seconds between status queries
-POWER_ON_TIMEOUT = 15.0       # total timeout for power-on
+POWER_ON_TIMEOUT = 20.0       # total timeout for power-on
 POWER_OFF_TIMEOUT = 8.0       # total timeout for power-off
-COMMAND_RESEND_INTERVAL = 5   # re-send original command every N query cycles
 
 # Set log level via LOG_LEVEL env var (e.g. LOG_LEVEL=DEBUG)
 log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
@@ -58,7 +55,6 @@ log = logging.getLogger("tvmaster")
 _cec_lock = threading.Lock()
 _cec_ready = False
 _tv = None
-_own_address = None
 
 
 class _PowerStatusState:
@@ -106,31 +102,9 @@ def _cec_command_callback(event, command):
 # ---------------------------------------------------------------------------
 
 
-def _detect_own_address() -> int:
-    """Detect our CEC logical address after initialization.
-
-    python-cec registers as a recording device. libcec claims the first
-    available address from {1, 2, 9}. list_devices() returns other devices
-    on the bus, so the first recording address not occupied by another
-    device matches libcec's allocation order.
-    """
-    candidates = [
-        cec.CECDEVICE_RECORDINGDEVICE1,
-        cec.CECDEVICE_RECORDINGDEVICE2,
-        cec.CECDEVICE_RECORDINGDEVICE3,
-    ]
-    remote = cec.list_devices()
-    log.debug("Remote CEC devices: %s", list(remote.keys()))
-    for addr in candidates:
-        if addr not in remote:
-            return addr
-    log.warning("All recording device addresses occupied, defaulting to RECORDINGDEVICE1")
-    return cec.CECDEVICE_RECORDINGDEVICE1
-
-
 def init_cec():
     """Initialize the CEC adapter (once at startup)."""
-    global _cec_ready, _tv, _own_address
+    global _cec_ready, _tv
 
     adapters = cec.list_adapters()
     if not adapters:
@@ -141,10 +115,9 @@ def init_cec():
     cec.init(adapters[0])
     cec.add_callback(_cec_command_callback, cec.EVENT_COMMAND)
 
-    _own_address = _detect_own_address()
     _tv = cec.Device(cec.CECDEVICE_TV)
     _cec_ready = True
-    log.info("CEC initialized, own address: %d, TV device ready", _own_address)
+    log.info("CEC initialized, TV device ready")
 
 
 # ---------------------------------------------------------------------------
@@ -152,31 +125,18 @@ def init_cec():
 # ---------------------------------------------------------------------------
 
 
-def _wait_for_power_status(
-    target: set[int],
-    timeout: float,
-    command: Callable | None = None,
-) -> bool:
+def _wait_for_power_status(target: set[int], timeout: float) -> bool:
     """Poll TV power status via CEC callback until it matches *target*.
 
     Must be called while holding _cec_lock.
 
     Sends ``Give Device Power Status`` (0x8F) every POWER_QUERY_INTERVAL and
-    listens for ``Report Power Status`` (0x90) via the async callback. Every
-    COMMAND_RESEND_INTERVAL cycles, re-sends *command* (e.g. power_on/standby)
-    in case the TV missed it.
+    listens for ``Report Power Status`` (0x90) via the async callback.
     """
     deadline = time.monotonic() + timeout
     cycle = 0
     while time.monotonic() < deadline:
         cycle += 1
-
-        # Re-send the original command periodically
-        if command and cycle % COMMAND_RESEND_INTERVAL == 0:
-            log.debug("_wait_for_power_status: re-sending command (cycle %d)", cycle)
-            command()
-
-        # Ask the TV for its power status
         _power_status.clear()
         cec.transmit(cec.CECDEVICE_TV, CEC_OPCODE_GIVE_DEVICE_POWER_STATUS, bytes())
         log.debug("_wait_for_power_status: sent Give Device Power Status (cycle %d)", cycle)
@@ -208,34 +168,20 @@ def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
         return False, "CEC not initialized"
     with _cec_lock:
         try:
-            transmit = None
+            log.debug("tv_on: power_on" + (f" + HDMI {hdmi_input}" if hdmi_input else ""))
+            _tv.power_on()
+
+            if not _wait_for_power_status({POWER_STATUS_ON}, POWER_ON_TIMEOUT):
+                return False, "TV did not turn on"
+
+            # Switch input after TV is confirmed on
             if hdmi_input is not None:
-                transmit = lambda: cec.transmit(
+                cec.transmit(
                     cec.CECDEVICE_BROADCAST,
                     CEC_OPCODE_ACTIVE_SOURCE,
                     bytes([hdmi_input << 4, 0x00]),
                 )
-            # Send power-on (and active source if requested)
-            log.debug("tv_on: power_on" + (f" + switch to HDMI {hdmi_input}" if transmit else ""))
-            _tv.power_on()
-            if transmit:
-                transmit()
-
-            # Wait for TV to report power on
-            if not _wait_for_power_status({POWER_STATUS_ON}, POWER_ON_TIMEOUT, command=_tv.power_on):
-                return False, "TV did not turn on"
-
-            # Verify active source if input was requested
-            if transmit and not _is_active_source():
-                log.warning("tv_on: not active source, retrying switch_input")
-                for attempt in range(MAX_RETRIES):
-                    transmit()
-                    time.sleep(POWER_QUERY_INTERVAL)
-                    if _is_active_source():
-                        break
-                    log.warning("tv_on: switch_input attempt %d failed", attempt + 1)
-                else:
-                    return False, "Input switch failed after retries"
+                log.debug("tv_on: sent Active Source for HDMI %d", hdmi_input)
 
             return True, "TV turned on"
         except Exception as e:
@@ -243,20 +189,15 @@ def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
             return False, str(e)
 
 
-def _is_active_source() -> bool:
-    return cec.is_active_source(_own_address)
-
-
 def tv_off() -> tuple[bool, str]:
     if not _cec_ready:
         return False, "CEC not initialized"
     with _cec_lock:
         try:
-            log.debug("tv_off: set_active_source + standby")
-            cec.set_active_source()
+            log.debug("tv_off: standby")
             _tv.standby()
 
-            if not _wait_for_power_status({POWER_STATUS_STANDBY}, POWER_OFF_TIMEOUT, command=_tv.standby):
+            if not _wait_for_power_status({POWER_STATUS_STANDBY}, POWER_OFF_TIMEOUT):
                 return False, "TV did not turn off"
 
             return True, "TV turned off"
