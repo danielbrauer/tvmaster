@@ -29,10 +29,7 @@ from flask import Flask, jsonify, request
 LAN_HOST = "0.0.0.0"
 LAN_PORT = 8080
 
-CEC_OPCODE_USER_CONTROL_PRESSED = 0x44
-CEC_OPCODE_USER_CONTROL_RELEASED = 0x45
 CEC_OPCODE_ACTIVE_SOURCE = 0x82
-CEC_UI_COMMAND_POWER_OFF_FUNCTION = 0x6C
 
 # Set log level via LOG_LEVEL env var (e.g. LOG_LEVEL=DEBUG)
 log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
@@ -94,17 +91,9 @@ def tv_off() -> tuple[bool, str]:
         return False, "CEC not initialized"
     with _cec_lock:
         try:
-            log.debug("tv_off: User Control Pressed - Power Off Function")
-            cec.transmit(
-                cec.CECDEVICE_TV,
-                CEC_OPCODE_USER_CONTROL_PRESSED,
-                bytes([CEC_UI_COMMAND_POWER_OFF_FUNCTION]),
-            )
-            cec.transmit(
-                cec.CECDEVICE_TV,
-                CEC_OPCODE_USER_CONTROL_RELEASED,
-                bytes(),
-            )
+            log.debug("tv_off: set_active_source + standby")
+            cec.set_active_source()
+            _tv.standby()
             return True, "TV turned off"
         except Exception as e:
             log.error("tv_off failed: %s", e)
