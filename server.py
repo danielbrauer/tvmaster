@@ -30,9 +30,13 @@ from flask import Flask, jsonify, request
 LAN_HOST = "0.0.0.0"
 LAN_PORT = 8080
 
+CEC_OPCODE_USER_CONTROL_PRESSED = 0x44
+CEC_OPCODE_USER_CONTROL_RELEASED = 0x45
 CEC_OPCODE_ACTIVE_SOURCE = 0x82
 CEC_OPCODE_GIVE_DEVICE_POWER_STATUS = 0x8F
 CEC_OPCODE_REPORT_POWER_STATUS = 0x90
+
+CEC_UI_COMMAND_POWER_OFF_FUNCTION = 0x6C
 
 POWER_STATUS_ON = 0x00
 POWER_STATUS_STANDBY = 0x01
@@ -194,8 +198,17 @@ def tv_off() -> tuple[bool, str]:
         return False, "CEC not initialized"
     with _cec_lock:
         try:
-            log.debug("tv_off: standby")
-            _tv.standby()
+            log.debug("tv_off: User Control Pressed - Power Off Function")
+            cec.transmit(
+                cec.CECDEVICE_TV,
+                CEC_OPCODE_USER_CONTROL_PRESSED,
+                bytes([CEC_UI_COMMAND_POWER_OFF_FUNCTION]),
+            )
+            cec.transmit(
+                cec.CECDEVICE_TV,
+                CEC_OPCODE_USER_CONTROL_RELEASED,
+                bytes(),
+            )
 
             if not _wait_for_power_status({POWER_STATUS_STANDBY}, POWER_OFF_TIMEOUT):
                 return False, "TV did not turn off"
