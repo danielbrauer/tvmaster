@@ -19,6 +19,7 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
 
 import cec
 from flask import Flask, jsonify, request
@@ -74,22 +75,23 @@ def init_cec():
 # ---------------------------------------------------------------------------
 
 
-def switch_input(hdmi_input: int) -> tuple[bool, str]:
-    """Switch the TV to the given HDMI input (1-4)."""
-    if not _cec_ready:
-        return False, "CEC not initialized"
-    with _cec_lock:
-        try:
-            log.debug("switch_input: %d", hdmi_input)
-            cec.transmit(
-                cec.CECDEVICE_BROADCAST,
-                CEC_OPCODE_ACTIVE_SOURCE,
-                bytes([hdmi_input << 4, 0x00]),
-            )
-            return True, f"Switched to HDMI {hdmi_input}"
-        except Exception as e:
-            log.error("switch_input failed: %s", e)
-            return False, str(e)
+def _cec_retry(name: str, command: Callable, check: Callable[[], bool]) -> bool:
+    """Send a CEC command and retry until check() returns True.
+
+    Must be called while holding _cec_lock.
+    """
+    for attempt in range(MAX_RETRIES):
+        log.debug("%s: attempt %d — sending command", name, attempt + 1)
+        command()
+        log.debug("%s: attempt %d — waiting %.1fs", name, attempt + 1, RETRY_DELAY)
+        time.sleep(RETRY_DELAY)
+        ok = check()
+        log.debug("%s: attempt %d — check=%s", name, attempt + 1, ok)
+        if ok:
+            return True
+        log.warning("%s: attempt %d — check failed, retrying", name, attempt + 1)
+    log.error("%s: failed after %d attempts", name, MAX_RETRIES)
+    return False
 
 
 def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
@@ -97,28 +99,16 @@ def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
         return False, "CEC not initialized"
     with _cec_lock:
         try:
-            log.debug("tv_on: hdmi_input=%s", hdmi_input)
-            for attempt in range(MAX_RETRIES):
-                log.debug("tv_on: attempt %d — sending power_on", attempt + 1)
-                _tv.power_on()
-                log.debug("tv_on: attempt %d — waiting %.1fs for state change", attempt + 1, RETRY_DELAY)
-                time.sleep(RETRY_DELAY)
-                is_on = _tv.is_on()
-                log.debug("tv_on: attempt %d — is_on=%s", attempt + 1, is_on)
-                if is_on:
-                    break
-                log.warning("tv_on: attempt %d — TV still off, retrying", attempt + 1)
-            else:
-                log.error("tv_on: TV still off after %d attempts", MAX_RETRIES)
+            if not _cec_retry("power_on", _tv.power_on, _tv.is_on):
                 return False, "TV did not turn on after retries"
             if hdmi_input is not None:
-                log.debug("tv_on: switching to HDMI %d", hdmi_input)
-                cec.transmit(
+                transmit = lambda: cec.transmit(
                     cec.CECDEVICE_BROADCAST,
                     CEC_OPCODE_ACTIVE_SOURCE,
                     bytes([hdmi_input << 4, 0x00]),
                 )
-            log.debug("tv_on: success")
+                if not _cec_retry("switch_input", transmit, lambda: cec.is_active_source(cec.CECDEVICE_TV)):
+                    return False, "Input switch failed after retries"
             return True, "TV turned on"
         except Exception as e:
             log.error("tv_on failed: %s", e)
@@ -130,23 +120,10 @@ def tv_off() -> tuple[bool, str]:
         return False, "CEC not initialized"
     with _cec_lock:
         try:
-            log.debug("tv_off: starting")
-            for attempt in range(MAX_RETRIES):
-                log.debug("tv_off: attempt %d — sending set_active_source", attempt + 1)
-                cec.set_active_source()
-                log.debug("tv_off: attempt %d — sending standby", attempt + 1)
-                _tv.standby()
-                log.debug("tv_off: attempt %d — waiting %.1fs for state change", attempt + 1, RETRY_DELAY)
-                time.sleep(RETRY_DELAY)
-                is_on = _tv.is_on()
-                log.debug("tv_off: attempt %d — is_on=%s", attempt + 1, is_on)
-                if not is_on:
-                    break
-                log.warning("tv_off: attempt %d — TV still on, retrying", attempt + 1)
-            else:
-                log.error("tv_off: TV still on after %d attempts", MAX_RETRIES)
+            if not _cec_retry("set_active_source", cec.set_active_source, lambda: cec.is_active_source(cec.CECDEVICE_TV)):
+                return False, "set_active_source failed after retries"
+            if not _cec_retry("standby", _tv.standby, lambda: not _tv.is_on()):
                 return False, "TV did not turn off after retries"
-            log.debug("tv_off: success")
             return True, "TV turned off"
         except Exception as e:
             log.error("tv_off failed: %s", e)
