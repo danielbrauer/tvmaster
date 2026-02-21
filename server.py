@@ -34,6 +34,7 @@ LAN_PORT = 8080
 CEC_OPCODE_ACTIVE_SOURCE = 0x82
 MAX_RETRIES = 3
 RETRY_DELAY = 1.0  # seconds between status checks
+POWER_ON_DELAY = 4.0  # seconds to wait after power-on commands
 
 # Set log level via LOG_LEVEL env var (e.g. LOG_LEVEL=DEBUG)
 log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
@@ -75,7 +76,7 @@ def init_cec():
 # ---------------------------------------------------------------------------
 
 
-def _cec_retry(name: str, command: Callable, check: Callable[[], bool]) -> bool:
+def _cec_retry(name: str, command: Callable, check: Callable[[], bool], delay: float = RETRY_DELAY) -> bool:
     """Send a CEC command and retry until check() returns True.
 
     Must be called while holding _cec_lock.
@@ -83,8 +84,8 @@ def _cec_retry(name: str, command: Callable, check: Callable[[], bool]) -> bool:
     for attempt in range(MAX_RETRIES):
         log.debug("%s: attempt %d — sending command", name, attempt + 1)
         command()
-        log.debug("%s: attempt %d — waiting %.1fs", name, attempt + 1, RETRY_DELAY)
-        time.sleep(RETRY_DELAY)
+        log.debug("%s: attempt %d — waiting %.1fs", name, attempt + 1, delay)
+        time.sleep(delay)
         ok = check()
         log.debug("%s: attempt %d — check=%s", name, attempt + 1, ok)
         if ok:
@@ -111,7 +112,7 @@ def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
             _tv.power_on()
             if transmit:
                 transmit()
-            time.sleep(RETRY_DELAY)
+            time.sleep(POWER_ON_DELAY)
             # Check final state, work backwards from there
             if transmit and _is_active_source() and _tv.is_on():
                 log.debug("tv_on: success on first try")
@@ -123,7 +124,7 @@ def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
             log.warning("tv_on: not fully successful after optimistic attempt")
             if not _tv.is_on():
                 log.warning("tv_on: TV not on, retrying power_on")
-                if not _cec_retry("power_on", _tv.power_on, _tv.is_on):
+                if not _cec_retry("power_on", _tv.power_on, _tv.is_on, POWER_ON_DELAY):
                     return False, "TV did not turn on after retries"
             if transmit and not _is_active_source():
                 log.warning("tv_on: not active source, retrying switch_input")
