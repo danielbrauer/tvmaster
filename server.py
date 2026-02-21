@@ -18,7 +18,6 @@ import argparse
 import logging
 import os
 import threading
-import time
 
 import cec
 from flask import Flask, jsonify, request
@@ -33,19 +32,7 @@ LAN_PORT = 8080
 CEC_OPCODE_USER_CONTROL_PRESSED = 0x44
 CEC_OPCODE_USER_CONTROL_RELEASED = 0x45
 CEC_OPCODE_ACTIVE_SOURCE = 0x82
-CEC_OPCODE_GIVE_DEVICE_POWER_STATUS = 0x8F
-CEC_OPCODE_REPORT_POWER_STATUS = 0x90
-
 CEC_UI_COMMAND_POWER_OFF_FUNCTION = 0x6C
-
-POWER_STATUS_ON = 0x00
-POWER_STATUS_STANDBY = 0x01
-POWER_STATUS_TRANSITION_TO_ON = 0x02
-POWER_STATUS_TRANSITION_TO_STANDBY = 0x03
-
-POWER_QUERY_INTERVAL = 1.0    # seconds between status queries
-POWER_ON_TIMEOUT = 20.0       # total timeout for power-on
-POWER_OFF_TIMEOUT = 8.0       # total timeout for power-off
 
 # Set log level via LOG_LEVEL env var (e.g. LOG_LEVEL=DEBUG)
 log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
@@ -60,46 +47,6 @@ _cec_lock = threading.Lock()
 _cec_ready = False
 _tv = None
 
-
-class _PowerStatusState:
-    """Thread-safe container for the latest Report Power Status byte."""
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._event = threading.Event()
-        self._status: int | None = None
-
-    def clear(self):
-        with self._lock:
-            self._status = None
-            self._event.clear()
-
-    def set(self, status: int):
-        with self._lock:
-            self._status = status
-            self._event.set()
-
-    def wait(self, timeout: float) -> int | None:
-        """Wait up to *timeout* seconds for a status byte. Returns the byte or None."""
-        if self._event.wait(timeout):
-            with self._lock:
-                return self._status
-        return None
-
-
-_power_status = _PowerStatusState()
-
-
-def _cec_command_callback(event, command):
-    """CEC command callback — filters for Report Power Status from the TV."""
-    if (
-        command["opcode"] == CEC_OPCODE_REPORT_POWER_STATUS
-        and command["initiator"] == cec.CECDEVICE_TV
-    ):
-        status = command["parameters"][0] if command["parameters"] else None
-        if status is not None:
-            log.debug("CEC callback: Report Power Status = 0x%02X", status)
-            _power_status.set(status)
 
 # ---------------------------------------------------------------------------
 # CEC init
@@ -117,54 +64,10 @@ def init_cec():
 
     log.info("CEC adapters: %s", adapters)
     cec.init(adapters[0])
-    cec.add_callback(_cec_command_callback, cec.EVENT_COMMAND)
 
     _tv = cec.Device(cec.CECDEVICE_TV)
     _cec_ready = True
     log.info("CEC initialized, TV device ready")
-
-
-# ---------------------------------------------------------------------------
-# CEC helpers
-# ---------------------------------------------------------------------------
-
-
-def _wait_for_power_status(target: set[int], timeout: float) -> bool:
-    """Poll TV power status via CEC callback until it matches *target*.
-
-    Must be called while holding _cec_lock.
-
-    Sends ``Give Device Power Status`` (0x8F) every POWER_QUERY_INTERVAL and
-    listens for ``Report Power Status`` (0x90) via the async callback.
-    """
-    deadline = time.monotonic() + timeout
-    cycle = 0
-    while time.monotonic() < deadline:
-        cycle += 1
-        _power_status.clear()
-        cec.transmit(cec.CECDEVICE_TV, CEC_OPCODE_GIVE_DEVICE_POWER_STATUS, bytes())
-        log.debug("_wait_for_power_status: sent Give Device Power Status (cycle %d)", cycle)
-
-        remaining = deadline - time.monotonic()
-        wait_time = min(POWER_QUERY_INTERVAL, max(remaining, 0))
-        status = _power_status.wait(wait_time)
-
-        if status is None:
-            log.debug("_wait_for_power_status: no response (cycle %d)", cycle)
-            continue
-
-        if status in target:
-            log.debug("_wait_for_power_status: target reached (0x%02X, cycle %d)", status, cycle)
-            return True
-
-        if status in (POWER_STATUS_TRANSITION_TO_ON, POWER_STATUS_TRANSITION_TO_STANDBY):
-            log.debug("_wait_for_power_status: TV in transition (0x%02X, cycle %d)", status, cycle)
-            continue
-
-        log.debug("_wait_for_power_status: status 0x%02X not in target (cycle %d)", status, cycle)
-
-    log.warning("_wait_for_power_status: timed out after %.1fs", timeout)
-    return False
 
 
 def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
@@ -174,19 +77,12 @@ def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
         try:
             log.debug("tv_on: power_on" + (f" + HDMI {hdmi_input}" if hdmi_input else ""))
             _tv.power_on()
-
-            if not _wait_for_power_status({POWER_STATUS_ON}, POWER_ON_TIMEOUT):
-                return False, "TV did not turn on"
-
-            # Switch input after TV is confirmed on
             if hdmi_input is not None:
                 cec.transmit(
                     cec.CECDEVICE_BROADCAST,
                     CEC_OPCODE_ACTIVE_SOURCE,
                     bytes([hdmi_input << 4, 0x00]),
                 )
-                log.debug("tv_on: sent Active Source for HDMI %d", hdmi_input)
-
             return True, "TV turned on"
         except Exception as e:
             log.error("tv_on failed: %s", e)
@@ -209,10 +105,6 @@ def tv_off() -> tuple[bool, str]:
                 CEC_OPCODE_USER_CONTROL_RELEASED,
                 bytes(),
             )
-
-            if not _wait_for_power_status({POWER_STATUS_STANDBY}, POWER_OFF_TIMEOUT):
-                return False, "TV did not turn off"
-
             return True, "TV turned off"
         except Exception as e:
             log.error("tv_off failed: %s", e)
