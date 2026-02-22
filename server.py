@@ -67,19 +67,17 @@ def init_cec():
     log.info("CEC initialized, TV device ready")
 
 
-def tv_on(hdmi_input: int | None = None) -> tuple[bool, str]:
+def tv_on(hdmi_input: int) -> tuple[bool, str]:
     if not _cec_ready:
         return False, "CEC not initialized"
     with _cec_lock:
         try:
-            log.debug("tv_on: power_on" + (f" + HDMI {hdmi_input}" if hdmi_input else ""))
-            _tv.power_on()
-            if hdmi_input is not None:
-                cec.transmit(
-                    cec.CECDEVICE_BROADCAST,
-                    CEC_OPCODE_ACTIVE_SOURCE,
-                    bytes([hdmi_input << 4, 0x00]),
-                )
+            log.debug("tv_on: active_source HDMI %d", hdmi_input)
+            cec.transmit(
+                cec.CECDEVICE_BROADCAST,
+                CEC_OPCODE_ACTIVE_SOURCE,
+                bytes([hdmi_input << 4, 0x00]),
+            )
             return True, "TV turned on"
         except Exception as e:
             log.error("tv_on failed: %s", e)
@@ -129,9 +127,9 @@ def tv_status_handler():
 
 @app.route("/tv/on", methods=["POST"])
 def tv_on_handler():
-    hdmi_input = request.json.get("input") if request.is_json else None
-    if hdmi_input is not None:
-        hdmi_input = int(hdmi_input)
+    if not request.is_json or "input" not in request.json:
+        return jsonify(ok=False, message="Missing required 'input' field"), 400
+    hdmi_input = int(request.json["input"])
     ok, message = tv_on(hdmi_input)
     status = 200 if ok else 500
     return jsonify(ok=ok, message=message), status
