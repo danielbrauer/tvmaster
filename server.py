@@ -31,6 +31,7 @@ LAN_HOST = "0.0.0.0"
 LAN_PORT = 8080
 
 CEC_OPCODE_ACTIVE_SOURCE = 0x82
+TV_ON_ACTIVE_SOURCE_DELAY = 10
 TV_OFF_STANDBY_DELAY = 5
 
 # Set log level via LOG_LEVEL env var (e.g. LOG_LEVEL=DEBUG)
@@ -74,7 +75,9 @@ def tv_on(hdmi_input: int) -> tuple[bool, str]:
         return False, "CEC not initialized"
     with _cec_lock:
         try:
-            log.debug("tv_on: active_source HDMI %d", hdmi_input)
+            log.debug("tv_on: power_on + active_source HDMI %d", hdmi_input)
+            _tv.power_on()
+            time.sleep(TV_ON_ACTIVE_SOURCE_DELAY)
             cec.transmit(
                 cec.CECDEVICE_BROADCAST,
                 CEC_OPCODE_ACTIVE_SOURCE,
