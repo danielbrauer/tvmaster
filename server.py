@@ -18,6 +18,7 @@ import argparse
 import logging
 import os
 import threading
+import time
 
 import cec
 from flask import Flask, jsonify, request
@@ -30,6 +31,7 @@ LAN_HOST = "0.0.0.0"
 LAN_PORT = 8080
 
 CEC_OPCODE_ACTIVE_SOURCE = 0x82
+TV_OFF_STANDBY_DELAY = 5
 
 # Set log level via LOG_LEVEL env var (e.g. LOG_LEVEL=DEBUG)
 log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
@@ -91,6 +93,7 @@ def tv_off() -> tuple[bool, str]:
         try:
             log.debug("tv_off: set_active_source + standby")
             cec.set_active_source()
+            time.sleep(TV_OFF_STANDBY_DELAY)
             _tv.standby()
             return True, "TV turned off"
         except Exception as e:
