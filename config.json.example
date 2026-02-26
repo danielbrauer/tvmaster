@@ -1,5 +1,6 @@
 {
   "tv_ip": "10.0.0.100",
+  "tv_mac": "AA:BB:CC:DD:EE:FF",
   "sources": {
     "appletv": 1,
     "ps5": 3

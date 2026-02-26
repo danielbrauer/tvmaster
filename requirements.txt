@@ -2,3 +2,4 @@ flask
 samsungtvws
 cec
 requests
+wakeonlan

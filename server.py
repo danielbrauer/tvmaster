@@ -2,12 +2,13 @@
 """
 Raspberry Pi TV control server (Flask).
 
-Controls a Samsung TV using samsungtvws (WebSocket) for power and CEC for
-HDMI input switching, with the Pi connected to the TV via Ethernet and HDMI.
+Controls a Samsung TV using samsungtvws (WebSocket) for power, WoL for
+waking from deep sleep, and CEC for HDMI input switching, with the Pi
+connected to the TV via Ethernet and HDMI.
 
 Endpoints:
   GET  /tv/status        - Returns TV power state
-  POST /tv/on            - Power on via WebSocket and switch HDMI input via CEC (JSON body: {"source": "<name>"})
+  POST /tv/on            - Power on via WoL/WebSocket and switch HDMI input via CEC (JSON body: {"source": "<name>"})
   POST /tv/off           - Turn TV off via WebSocket KEY_POWER (JSON body: {"source": "<name>"})
   POST /tv/key           - Send arbitrary key via WebSocket (JSON body: {"key": "KEY_..."})
 
@@ -27,6 +28,7 @@ import cec
 import requests
 from flask import Flask, jsonify, request
 from samsungtvws import SamsungTVWS
+from wakeonlan import send_magic_packet
 
 # ---------------------------------------------------------------------------
 # Config
@@ -54,6 +56,7 @@ with open(config_path) as f:
     _config = json.load(f)
 
 TV_IP = _config["tv_ip"]
+TV_MAC = _config["tv_mac"]
 SOURCES = _config["sources"]  # e.g. {"appletv": 1, "ps5": 3}
 INPUTS_TO_SOURCES = {v: k for k, v in SOURCES.items()}
 TV_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tv-token.txt")
@@ -68,13 +71,15 @@ active_source_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 
-def tv_is_on() -> bool:
-    """Check PowerState from the TV's REST API."""
+def tv_power_state() -> str:
+    """Return 'on', 'standby', or 'unreachable'."""
     try:
         r = requests.get(f"http://{TV_IP}:8001/api/v2/", timeout=TV_API_TIMEOUT)
-        return r.json()["device"]["PowerState"] == "on"
+        if r.json()["device"]["PowerState"] == "on":
+            return "on"
+        return "standby"
     except (requests.RequestException, KeyError):
-        return False
+        return "unreachable"
 
 
 def cec_set_active_source(hdmi_input: int):
@@ -90,18 +95,28 @@ def tv_on(source: str) -> tuple[bool, str]:
     global active_source
     hdmi_input = SOURCES[source]
     try:
-        if not tv_is_on():
-            log.debug("tv_on: KEY_POWER then CEC HDMI %d for %s", hdmi_input, source)
-            tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
-            tv.send_key("KEY_POWER")
-            tv.close()
-            deadline = time.monotonic() + POWER_POLL_TIMEOUT
-            while not tv_is_on():
-                if time.monotonic() > deadline:
-                    return False, "Timed out waiting for TV to turn on"
-                time.sleep(POWER_POLL_INTERVAL)
-        else:
+        state = tv_power_state()
+        if state == "on":
             log.debug("tv_on: already on, CEC HDMI %d for %s", hdmi_input, source)
+        else:
+            deadline = time.monotonic() + POWER_POLL_TIMEOUT
+            if state == "unreachable":
+                log.debug("tv_on: WoL to %s for %s", TV_MAC, source)
+                send_magic_packet(TV_MAC)
+                while tv_power_state() == "unreachable":
+                    if time.monotonic() > deadline:
+                        return False, "Timed out waiting for TV to become reachable"
+                    time.sleep(POWER_POLL_INTERVAL)
+            state = tv_power_state()
+            if state == "standby":
+                log.debug("tv_on: KEY_POWER then CEC HDMI %d for %s", hdmi_input, source)
+                tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
+                tv.send_key("KEY_POWER")
+                tv.close()
+                while tv_power_state() != "on":
+                    if time.monotonic() > deadline:
+                        return False, "Timed out waiting for TV to turn on"
+                    time.sleep(POWER_POLL_INTERVAL)
         cec_set_active_source(hdmi_input)
         with active_source_lock:
             active_source = source
@@ -114,7 +129,7 @@ def tv_on(source: str) -> tuple[bool, str]:
 def tv_off(source: str) -> tuple[bool, str]:
     global active_source
     try:
-        if not tv_is_on():
+        if tv_power_state() != "on":
             log.debug("tv_off: already off")
             return True, "TV already off"
         with active_source_lock:
@@ -136,7 +151,7 @@ def tv_off(source: str) -> tuple[bool, str]:
 def tv_status() -> tuple[bool, str]:
     try:
         log.debug("tv_status")
-        return True, "on" if tv_is_on() else "off"
+        return True, "on" if tv_power_state() == "on" else "off"
     except Exception as e:
         log.error("tv_status failed: %s", e)
         return False, str(e)
