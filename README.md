@@ -2,6 +2,13 @@
 
 A Raspberry Pi TV control server that manages a Samsung TV over a direct Ethernet connection using WebSocket (`samsungtvws`) and Wake-on-LAN.
 
+## TV settings
+
+Enable these in the TV's settings menu (General & Privacy > External Device Manager):
+
+- **IP Remote** — allows WebSocket control (key commands for power off and HDMI switching)
+- **Power on with Mobile** — allows Wake-on-LAN (keeps the network adapter active in standby)
+
 ## Network setup
 
 The Pi connects directly to the TV via a USB Ethernet adapter (RTL8152B). The Pi runs a DHCP server on that interface so the TV gets an IP address. No router or internet access is needed for this link.
@@ -47,7 +54,7 @@ pip install -r requirements.txt
 
 ## Configuration
 
-Copy the example config and fill in your TV's IP and MAC address:
+Copy the example config and fill in your TV's MAC address (found in the TV's settings under General & Privacy > Network > Network Status):
 
 ```
 cp config.json.example config.json
