@@ -7,8 +7,8 @@ HDMI input switching, with the Pi connected to the TV via Ethernet and HDMI.
 
 Endpoints:
   GET  /tv/status        - Returns TV power state
-  POST /tv/on            - Power on via WebSocket and switch HDMI input via CEC (JSON body: {"input": 1-4})
-  POST /tv/off           - Turn TV off via WebSocket KEY_POWER
+  POST /tv/on            - Power on via WebSocket and switch HDMI input via CEC (JSON body: {"source": "<name>"})
+  POST /tv/off           - Turn TV off via WebSocket KEY_POWER (JSON body: {"source": "<name>"})
   POST /tv/key           - Send arbitrary key via WebSocket (JSON body: {"key": "KEY_..."})
 
 Usage:
@@ -54,10 +54,14 @@ with open(config_path) as f:
     _config = json.load(f)
 
 TV_IP = _config["tv_ip"]
+SOURCES = _config["sources"]  # e.g. {"appletv": 1, "ps5": 3}
+INPUTS_TO_SOURCES = {v: k for k, v in SOURCES.items()}
 TV_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tv-token.txt")
 
 cec.init()
 cec_lock = threading.Lock()
+active_source = None
+active_source_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # TV control
@@ -82,10 +86,12 @@ def cec_set_active_source(hdmi_input: int):
         )
 
 
-def tv_on(hdmi_input: int) -> tuple[bool, str]:
+def tv_on(source: str) -> tuple[bool, str]:
+    global active_source
+    hdmi_input = SOURCES[source]
     try:
         if not tv_is_on():
-            log.debug("tv_on: KEY_POWER then CEC HDMI %d", hdmi_input)
+            log.debug("tv_on: KEY_POWER then CEC HDMI %d for %s", hdmi_input, source)
             tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
             tv.send_key("KEY_POWER")
             tv.close()
@@ -95,23 +101,32 @@ def tv_on(hdmi_input: int) -> tuple[bool, str]:
                     return False, "Timed out waiting for TV to turn on"
                 time.sleep(POWER_POLL_INTERVAL)
         else:
-            log.debug("tv_on: already on, CEC HDMI %d", hdmi_input)
+            log.debug("tv_on: already on, CEC HDMI %d for %s", hdmi_input, source)
         cec_set_active_source(hdmi_input)
-        return True, "TV turned on"
+        with active_source_lock:
+            active_source = source
+        return True, f"TV on, source {source} (HDMI {hdmi_input})"
     except Exception as e:
         log.error("tv_on failed: %s", e)
         return False, str(e)
 
 
-def tv_off() -> tuple[bool, str]:
+def tv_off(source: str) -> tuple[bool, str]:
+    global active_source
     try:
         if not tv_is_on():
             log.debug("tv_off: already off")
             return True, "TV already off"
-        log.debug("tv_off: KEY_POWER")
+        with active_source_lock:
+            if active_source is not None and active_source != source:
+                log.debug("tv_off: ignoring, active source is %s not %s", active_source, source)
+                return True, f"TV in use by {active_source}"
+        log.debug("tv_off: KEY_POWER for %s", source)
         tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
         tv.send_key("KEY_POWER")
         tv.close()
+        with active_source_lock:
+            active_source = None
         return True, "TV turned off"
     except Exception as e:
         log.error("tv_off failed: %s", e)
@@ -134,6 +149,25 @@ def tv_status() -> tuple[bool, str]:
 app = Flask("tvmaster")
 
 
+def resolve_source() -> tuple[str, None] | tuple[None, str]:
+    """Return (source_name, None) or (None, error_message) from request JSON."""
+    if not request.is_json:
+        return None, "Request must be JSON"
+    body = request.json
+    if "source" in body:
+        source = body["source"]
+        if source not in SOURCES:
+            return None, f"Unknown source '{source}', expected one of: {', '.join(SOURCES)}"
+        return source, None
+    if "input" in body:
+        hdmi_input = int(body["input"])
+        if hdmi_input not in INPUTS_TO_SOURCES:
+            valid = ', '.join(str(i) for i in sorted(INPUTS_TO_SOURCES))
+            return None, f"Unknown input {hdmi_input}, expected one of: {valid}"
+        return INPUTS_TO_SOURCES[hdmi_input], None
+    return None, "Missing required 'source' or 'input' field"
+
+
 @app.route("/tv/status", methods=["GET"])
 def tv_status_handler():
     ok, message = tv_status()
@@ -143,19 +177,20 @@ def tv_status_handler():
 
 @app.route("/tv/on", methods=["POST"])
 def tv_on_handler():
-    if not request.is_json or "input" not in request.json:
-        return jsonify(ok=False, message="Missing required 'input' field"), 400
-    hdmi_input = int(request.json["input"])
-    if hdmi_input not in range(1, 5):
-        return jsonify(ok=False, message="'input' must be 1-4"), 400
-    ok, message = tv_on(hdmi_input)
+    source, err = resolve_source()
+    if err:
+        return jsonify(ok=False, message=err), 400
+    ok, message = tv_on(source)
     status = 200 if ok else 500
     return jsonify(ok=ok, message=message), status
 
 
 @app.route("/tv/off", methods=["POST"])
 def tv_off_handler():
-    ok, message = tv_off()
+    source, err = resolve_source()
+    if err:
+        return jsonify(ok=False, message=err), 400
+    ok, message = tv_off(source)
     status = 200 if ok else 500
     return jsonify(ok=ok, message=message), status
 
