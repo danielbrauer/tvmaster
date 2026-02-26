@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Raspberry Pi CEC TV control server (Flask).
+Raspberry Pi TV control server (Flask).
 
-Exposes TV power control via HDMI-CEC as HTTP endpoints on the local network.
+Controls a Samsung TV over the network using samsungtvws (WebSocket) and
+Wake-on-LAN, with the Pi connected directly to the TV via Ethernet.
 
 Endpoints:
   GET  /tv/status        - Returns TV power state
-  POST /tv/on            - Turn TV on via CEC (optional JSON body: {"input": 1-4})
-  POST /tv/off           - Turn TV off via CEC
+  POST /tv/on            - Wake TV via WoL and switch HDMI input (JSON body: {"input": 1-4})
+  POST /tv/off           - Turn TV off via WebSocket KEY_POWER
 
 Usage:
   python3 server.py
@@ -15,13 +16,15 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import os
-import threading
 import time
 
-import cec
+import requests
 from flask import Flask, jsonify, request
+from samsungtvws import SamsungTVWS
+from wakeonlan import send_magic_packet
 
 # ---------------------------------------------------------------------------
 # Config
@@ -30,9 +33,16 @@ from flask import Flask, jsonify, request
 LAN_HOST = "0.0.0.0"
 LAN_PORT = 8080
 
-CEC_OPCODE_ACTIVE_SOURCE = 0x82
-TV_ON_ACTIVE_SOURCE_DELAY = 10
-TV_OFF_STANDBY_DELAY = 5
+TV_API_TIMEOUT = 2
+WOL_POLL_INTERVAL = 2
+WOL_POLL_TIMEOUT = 30
+
+HDMI_KEYS = {
+    1: "KEY_HDMI1",
+    2: "KEY_HDMI2",
+    3: "KEY_HDMI3",
+    4: "KEY_HDMI4",
+}
 
 # Set log level via LOG_LEVEL env var (e.g. LOG_LEVEL=DEBUG)
 log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
@@ -40,85 +50,75 @@ logging.basicConfig(level=getattr(logging, log_level, logging.WARNING))
 log = logging.getLogger("tvmaster")
 
 # ---------------------------------------------------------------------------
-# CEC state
+# Load config
 # ---------------------------------------------------------------------------
 
-_cec_lock = threading.Lock()
-_cec_ready = False
-_tv = None
+config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+with open(config_path) as f:
+    _config = json.load(f)
 
+TV_IP = _config["tv_ip"]
+TV_MAC = _config["tv_mac"]
 
 # ---------------------------------------------------------------------------
-# CEC init
+# TV control
 # ---------------------------------------------------------------------------
 
 
-def init_cec():
-    """Initialize the CEC adapter (once at startup)."""
-    global _cec_ready, _tv
-
-    adapters = cec.list_adapters()
-    if not adapters:
-        log.error("No CEC adapters found")
-        return
-
-    log.info("CEC adapters: %s", adapters)
-    cec.init(adapters[0])
-
-    _tv = cec.Device(cec.CECDEVICE_TV)
-    _cec_ready = True
-    log.info("CEC initialized, TV device ready")
+def tv_is_on() -> bool:
+    """Check if TV is reachable via its HTTP API."""
+    try:
+        requests.get(f"http://{TV_IP}:8001/api/v2/", timeout=TV_API_TIMEOUT)
+        return True
+    except requests.RequestException:
+        return False
 
 
 def tv_on(hdmi_input: int) -> tuple[bool, str]:
-    if not _cec_ready:
-        return False, "CEC not initialized"
-    with _cec_lock:
-        try:
-            log.debug("tv_on: power_on + active_source HDMI %d", hdmi_input)
-            _tv.power_on()
-            time.sleep(TV_ON_ACTIVE_SOURCE_DELAY)
-            cec.transmit(
-                cec.CECDEVICE_BROADCAST,
-                CEC_OPCODE_ACTIVE_SOURCE,
-                bytes([hdmi_input << 4, 0x00]),
-            )
-            return True, "TV turned on"
-        except Exception as e:
-            log.error("tv_on failed: %s", e)
-            return False, str(e)
+    try:
+        log.debug("tv_on: WoL to %s, then HDMI %d", TV_MAC, hdmi_input)
+        send_magic_packet(TV_MAC)
+
+        deadline = time.monotonic() + WOL_POLL_TIMEOUT
+        while time.monotonic() < deadline:
+            if tv_is_on():
+                break
+            time.sleep(WOL_POLL_INTERVAL)
+        else:
+            return False, "TV did not come online within timeout"
+
+        tv = SamsungTVWS(host=TV_IP)
+        tv.send_key(HDMI_KEYS[hdmi_input])
+        tv.close()
+        return True, "TV turned on"
+    except Exception as e:
+        log.error("tv_on failed: %s", e)
+        return False, str(e)
 
 
 def tv_off() -> tuple[bool, str]:
-    if not _cec_ready:
-        return False, "CEC not initialized"
-    with _cec_lock:
-        try:
-            log.debug("tv_off: set_active_source + standby")
-            cec.set_active_source()
-            time.sleep(TV_OFF_STANDBY_DELAY)
-            _tv.standby()
-            return True, "TV turned off"
-        except Exception as e:
-            log.error("tv_off failed: %s", e)
-            return False, str(e)
+    try:
+        log.debug("tv_off: KEY_POWER")
+        tv = SamsungTVWS(host=TV_IP)
+        tv.send_key("KEY_POWER")
+        tv.close()
+        return True, "TV turned off"
+    except Exception as e:
+        log.error("tv_off failed: %s", e)
+        return False, str(e)
 
 
 def tv_status() -> tuple[bool, str]:
-    """Query TV power status."""
-    if not _cec_ready:
-        return False, "CEC not initialized"
-    with _cec_lock:
-        try:
-            log.debug("tv_status")
-            return True, "on" if _tv.is_on() else "off"
-        except Exception as e:
-            log.error("tv_status failed: %s", e)
-            return False, str(e)
+    try:
+        log.debug("tv_status")
+        return True, "on" if tv_is_on() else "off"
+    except Exception as e:
+        log.error("tv_status failed: %s", e)
+        return False, str(e)
 
 
 # ---------------------------------------------------------------------------
-# Flask app (TV/CEC — network-accessible)
+# Flask app
 # ---------------------------------------------------------------------------
 
 app = Flask("tvmaster")
@@ -136,6 +136,8 @@ def tv_on_handler():
     if not request.is_json or "input" not in request.json:
         return jsonify(ok=False, message="Missing required 'input' field"), 400
     hdmi_input = int(request.json["input"])
+    if hdmi_input not in HDMI_KEYS:
+        return jsonify(ok=False, message="'input' must be 1-4"), 400
     ok, message = tv_on(hdmi_input)
     status = 200 if ok else 500
     return jsonify(ok=ok, message=message), status
@@ -154,7 +156,7 @@ def tv_off_handler():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Raspberry Pi CEC TV control server")
+    parser = argparse.ArgumentParser(description="Raspberry Pi TV control server")
     parser.add_argument(
         "--lan-port",
         type=int,
@@ -167,8 +169,6 @@ def main():
         help=f"LAN bind address (default {LAN_HOST})",
     )
     args = parser.parse_args()
-
-    init_cec()
 
     print(f"LAN app: {args.lan_host}:{args.lan_port}")
 

@@ -1,11 +1,45 @@
 # tvmaster
 
-A Raspberry Pi TV control hub that exposes HDMI-CEC commands as HTTP endpoints via Flask.
+A Raspberry Pi TV control server that manages a Samsung TV over a direct Ethernet connection using WebSocket (`samsungtvws`) and Wake-on-LAN.
+
+## Network setup
+
+The Pi connects directly to the TV via a USB Ethernet adapter (RTL8152B). The Pi runs a DHCP server on that interface so the TV gets an IP address. No router or internet access is needed for this link.
+
+### 1. Assign a static IP to the USB Ethernet adapter
+
+Create `/etc/systemd/network/10-tv-link.network` (replace `eth1` with your interface name):
+
+```ini
+[Match]
+Name=eth1
+
+[Network]
+Address=10.0.0.1/24
+```
+
+Then restart networking:
+
+```
+sudo systemctl restart systemd-networkd
+```
+
+### 2. Install and configure dnsmasq
+
+```
+sudo apt install dnsmasq
+sudo cp dnsmasq.conf.example /etc/dnsmasq.d/tvmaster.conf
+```
+
+Edit `/etc/dnsmasq.d/tvmaster.conf` and set the correct interface name, then:
+
+```
+sudo systemctl restart dnsmasq
+```
 
 ## Setup
 
 ```
-sudo apt install libcec-dev build-essential python3-dev
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -13,10 +47,23 @@ pip install -r requirements.txt
 
 ## Configuration
 
+Copy the example config and fill in your TV's IP and MAC address:
+
+```
+cp config.json.example config.json
+```
+
+```json
+{
+  "tv_ip": "10.0.0.100",
+  "tv_mac": "AA:BB:CC:DD:EE:FF"
+}
+```
+
 ### Environment variables
 
-| Variable    | Description                          | Default   |
-|-------------|--------------------------------------|-----------|
+| Variable    | Description                               | Default   |
+|-------------|-------------------------------------------|-----------|
 | `LOG_LEVEL` | Werkzeug log level (e.g. `DEBUG`, `INFO`) | `WARNING` |
 
 ### Command-line options
@@ -25,16 +72,16 @@ pip install -r requirements.txt
 python3 server.py [--lan-port PORT] [--lan-host HOST]
 ```
 
-| Flag         | Description                        | Default              |
-|--------------|------------------------------------|----------------------|
-| `--lan-port` | LAN-facing port                    | `8080`               |
-| `--lan-host` | LAN bind address                   | `0.0.0.0`            |
+| Flag         | Description     | Default  |
+|--------------|-----------------|----------|
+| `--lan-port` | LAN-facing port | `8080`   |
+| `--lan-host` | LAN bind address| `0.0.0.0`|
 
 ## Endpoints
 
 ### `GET /tv/status`
 
-Returns the TV power state.
+Returns the TV power state by checking if the TV's HTTP API is reachable.
 
 ```json
 { "ok": true, "message": "on" }
@@ -42,17 +89,17 @@ Returns the TV power state.
 
 ### `POST /tv/on`
 
-Turn the TV on. Optionally pass a JSON body to switch to a specific HDMI input:
+Wake the TV via Wake-on-LAN and switch to an HDMI input. Requires a JSON body:
 
 ```json
 { "input": 1 }
 ```
 
-`input` (1-4) corresponds to HDMI port number. If omitted, the TV turns on without changing input.
+`input` (1-4) corresponds to HDMI port number.
 
 ### `POST /tv/off`
 
-Turn the TV off (standby).
+Turn the TV off (standby) by sending `KEY_POWER` via WebSocket.
 
 ## Running as a systemd service
 

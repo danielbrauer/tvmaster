@@ -1,0 +1,13 @@
+# dnsmasq config for direct Pi-to-TV Ethernet link
+# Copy to /etc/dnsmasq.d/tvmaster.conf and adjust interface name
+
+# Bind only to the USB Ethernet adapter (replace with your interface name)
+interface=eth1
+bind-interfaces
+
+# DHCP range — single IP for the TV
+dhcp-range=10.0.0.100,10.0.0.100,24h
+
+# No DNS forwarding, no default gateway — isolated link
+no-resolv
+no-hosts

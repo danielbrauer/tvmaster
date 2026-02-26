@@ -1,5 +1,5 @@
 [Unit]
-Description=tvmaster CEC TV control
+Description=tvmaster TV control
 After=network.target
 
 [Service]
