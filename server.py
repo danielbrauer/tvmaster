@@ -2,13 +2,14 @@
 """
 Raspberry Pi TV control server (Flask).
 
-Controls a Samsung TV over the network using samsungtvws (WebSocket) and
-Wake-on-LAN, with the Pi connected directly to the TV via Ethernet.
+Controls a Samsung TV using samsungtvws (WebSocket) for power and CEC for
+HDMI input switching, with the Pi connected to the TV via Ethernet and HDMI.
 
 Endpoints:
   GET  /tv/status        - Returns TV power state
-  POST /tv/on            - Wake TV via WoL and switch HDMI input (JSON body: {"input": 1-4})
+  POST /tv/on            - Power on via WebSocket and switch HDMI input via CEC (JSON body: {"input": 1-4})
   POST /tv/off           - Turn TV off via WebSocket KEY_POWER
+  POST /tv/key           - Send arbitrary key via WebSocket (JSON body: {"key": "KEY_..."})
 
 Usage:
   python3 server.py
@@ -19,12 +20,13 @@ import argparse
 import json
 import logging
 import os
+import threading
 import time
 
+import cec
 import requests
 from flask import Flask, jsonify, request
 from samsungtvws import SamsungTVWS
-from wakeonlan import send_magic_packet
 
 # ---------------------------------------------------------------------------
 # Config
@@ -34,15 +36,9 @@ LAN_HOST = "0.0.0.0"
 LAN_PORT = 8080
 
 TV_API_TIMEOUT = 2
-WOL_POLL_INTERVAL = 2
-WOL_POLL_TIMEOUT = 30
-
-HDMI_KEYS = {
-    1: "KEY_HDMI1",
-    2: "KEY_HDMI2",
-    3: "KEY_HDMI3",
-    4: "KEY_HDMI4",
-}
+POWER_POLL_INTERVAL = 2
+POWER_POLL_TIMEOUT = 30
+CEC_OPCODE_ACTIVE_SOURCE = 0x82
 
 # Set log level via LOG_LEVEL env var (e.g. LOG_LEVEL=DEBUG)
 log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
@@ -58,8 +54,10 @@ with open(config_path) as f:
     _config = json.load(f)
 
 TV_IP = _config["tv_ip"]
-TV_MAC = _config["tv_mac"]
 TV_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tv-token.txt")
+
+cec.init()
+cec_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # TV control
@@ -67,22 +65,38 @@ TV_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tv-tok
 
 
 def tv_is_on() -> bool:
-    """Check if TV is reachable via its HTTP API."""
+    """Check PowerState from the TV's REST API."""
     try:
-        requests.get(f"http://{TV_IP}:8001/api/v2/", timeout=TV_API_TIMEOUT)
-        return True
-    except requests.RequestException:
+        r = requests.get(f"http://{TV_IP}:8001/api/v2/", timeout=TV_API_TIMEOUT)
+        return r.json()["device"]["PowerState"] == "on"
+    except (requests.RequestException, KeyError):
         return False
+
+
+def cec_set_active_source(hdmi_input: int):
+    with cec_lock:
+        cec.transmit(
+            cec.CECDEVICE_BROADCAST,
+            CEC_OPCODE_ACTIVE_SOURCE,
+            bytes([hdmi_input << 4, 0x00]),
+        )
 
 
 def tv_on(hdmi_input: int) -> tuple[bool, str]:
     try:
-        log.debug("tv_on: WoL to %s, then HDMI %d", TV_MAC, hdmi_input)
-        send_magic_packet(TV_MAC)
-        time.sleep(10)
-        tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
-        tv.send_key(HDMI_KEYS[hdmi_input])
-        tv.close()
+        if not tv_is_on():
+            log.debug("tv_on: KEY_POWER then CEC HDMI %d", hdmi_input)
+            tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
+            tv.send_key("KEY_POWER")
+            tv.close()
+            deadline = time.monotonic() + POWER_POLL_TIMEOUT
+            while not tv_is_on():
+                if time.monotonic() > deadline:
+                    return False, "Timed out waiting for TV to turn on"
+                time.sleep(POWER_POLL_INTERVAL)
+        else:
+            log.debug("tv_on: already on, CEC HDMI %d", hdmi_input)
+        cec_set_active_source(hdmi_input)
         return True, "TV turned on"
     except Exception as e:
         log.error("tv_on failed: %s", e)
@@ -91,6 +105,9 @@ def tv_on(hdmi_input: int) -> tuple[bool, str]:
 
 def tv_off() -> tuple[bool, str]:
     try:
+        if not tv_is_on():
+            log.debug("tv_off: already off")
+            return True, "TV already off"
         log.debug("tv_off: KEY_POWER")
         tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
         tv.send_key("KEY_POWER")
@@ -129,7 +146,7 @@ def tv_on_handler():
     if not request.is_json or "input" not in request.json:
         return jsonify(ok=False, message="Missing required 'input' field"), 400
     hdmi_input = int(request.json["input"])
-    if hdmi_input not in HDMI_KEYS:
+    if hdmi_input not in range(1, 5):
         return jsonify(ok=False, message="'input' must be 1-4"), 400
     ok, message = tv_on(hdmi_input)
     status = 200 if ok else 500
