@@ -59,6 +59,7 @@ with open(config_path) as f:
 
 TV_IP = _config["tv_ip"]
 TV_MAC = _config["tv_mac"]
+TV_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tv-token.txt")
 
 # ---------------------------------------------------------------------------
 # TV control
@@ -87,7 +88,7 @@ def tv_on(hdmi_input: int) -> tuple[bool, str]:
         else:
             return False, "TV did not come online within timeout"
 
-        tv = SamsungTVWS(host=TV_IP)
+        tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
         tv.send_key(HDMI_KEYS[hdmi_input])
         tv.close()
         return True, "TV turned on"
@@ -99,7 +100,7 @@ def tv_on(hdmi_input: int) -> tuple[bool, str]:
 def tv_off() -> tuple[bool, str]:
     try:
         log.debug("tv_off: KEY_POWER")
-        tv = SamsungTVWS(host=TV_IP)
+        tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
         tv.send_key("KEY_POWER")
         tv.close()
         return True, "TV turned off"
