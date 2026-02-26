@@ -77,18 +77,10 @@ def tv_is_on() -> bool:
 
 def tv_on(hdmi_input: int) -> tuple[bool, str]:
     try:
-        log.debug("tv_on: WoL to %s, then HDMI %d", TV_MAC, hdmi_input)
-        send_magic_packet(TV_MAC)
-
-        deadline = time.monotonic() + WOL_POLL_TIMEOUT
-        while time.monotonic() < deadline:
-            if tv_is_on():
-                break
-            time.sleep(WOL_POLL_INTERVAL)
-        else:
-            return False, "TV did not come online within timeout"
-
+        log.debug("tv_on: KEY_POWER then HDMI %d", hdmi_input)
         tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
+        tv.send_key("KEY_POWER")
+        time.sleep(10)
         tv.send_key(HDMI_KEYS[hdmi_input])
         tv.close()
         return True, "TV turned on"
