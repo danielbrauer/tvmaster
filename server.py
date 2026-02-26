@@ -143,6 +143,20 @@ def tv_off_handler():
     return jsonify(ok=ok, message=message), status
 
 
+@app.route("/tv/key", methods=["POST"])
+def tv_key_handler():
+    if not request.is_json or "key" not in request.json:
+        return jsonify(ok=False, message="Missing required 'key' field"), 400
+    key = request.json["key"]
+    try:
+        tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
+        tv.send_key(key)
+        tv.close()
+        return jsonify(ok=True, message=f"Sent {key}")
+    except Exception as e:
+        return jsonify(ok=False, message=str(e)), 500
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
