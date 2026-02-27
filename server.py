@@ -133,7 +133,7 @@ def tv_off(source: str) -> tuple[bool, str]:
             log.debug("tv_off: already off")
             return True, "TV already off"
         with active_source_lock:
-            if active_source is not None and active_source != source:
+            if source != "override" and active_source is not None and active_source != source:
                 log.debug("tv_off: ignoring, active source is %s not %s", active_source, source)
                 return True, f"TV in use by {active_source}"
         log.debug("tv_off: KEY_POWER for %s", source)
@@ -171,7 +171,7 @@ def resolve_source() -> tuple[str, None] | tuple[None, str]:
     body = request.json
     if "source" in body:
         source = body["source"]
-        if source not in SOURCES:
+        if source != "override" and source not in SOURCES:
             return None, f"Unknown source '{source}', expected one of: {', '.join(SOURCES)}"
         return source, None
     if "input" in body:
