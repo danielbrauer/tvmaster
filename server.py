@@ -102,7 +102,7 @@ def tv_on(source: str) -> tuple[bool, str]:
             deadline = time.monotonic() + POWER_POLL_TIMEOUT
             if state == "unreachable":
                 log.debug("tv_on: WoL to %s for %s", TV_MAC, source)
-                send_magic_packet(TV_MAC)
+                send_magic_packet(TV_MAC, ip_address="10.0.0.255")
                 while tv_power_state() == "unreachable":
                     if time.monotonic() > deadline:
                         return False, "Timed out waiting for TV to become reachable"
