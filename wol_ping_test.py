@@ -15,9 +15,11 @@ with open(config_path) as f:
 TV_IP = config["tv_ip"]
 TV_MAC = config["tv_mac"]
 
-print(f"Sending WoL to {TV_MAC} via {TV_IP}...")
+BROADCAST = "10.0.0.255"
+
+print(f"Sending WoL to {TV_MAC} via {BROADCAST}...")
 t0 = time.monotonic()
-send_magic_packet(TV_MAC, ip_address=TV_IP)
+send_magic_packet(TV_MAC, ip_address=BROADCAST)
 
 print(f"Pinging {TV_IP} every second...")
 while True:
