@@ -9,7 +9,7 @@ connected to the TV via Ethernet and HDMI.
 Endpoints:
   GET  /tv/status        - Returns TV power state
   POST /tv/on            - Power on via WoL/WebSocket and switch HDMI input via CEC (JSON body: {"source": "<name>"})
-  POST /tv/off           - Turn TV off via WebSocket KEY_POWEROFF (JSON body: {"source": "<name>"})
+  POST /tv/off           - Turn TV off via WebSocket KEY_POWER (JSON body: {"source": "<name>"})
   POST /tv/key           - Send arbitrary key via WebSocket (JSON body: {"key": "KEY_..."})
 
 Usage:
@@ -101,17 +101,16 @@ def tv_on(source: str) -> tuple[bool, str]:
         else:
             deadline = time.monotonic() + POWER_POLL_TIMEOUT
             if state == "unreachable":
-                log.debug("tv_on: WoL to %s for %s", TV_MAC, source)
+                log.debug("tv_on: WoL to %s then CEC HDMI %d for %s", TV_MAC, hdmi_input, source)
                 send_magic_packet(TV_MAC, ip_address="10.0.0.255")
-                while tv_power_state() == "unreachable":
+                while tv_power_state() != "on":
                     if time.monotonic() > deadline:
-                        return False, "Timed out waiting for TV to become reachable"
+                        return False, "Timed out waiting for TV to turn on"
                     time.sleep(POWER_POLL_INTERVAL)
-            state = tv_power_state()
-            if state == "standby":
-                log.debug("tv_on: KEY_POWERON then CEC HDMI %d for %s", hdmi_input, source)
+            elif state == "standby":
+                log.debug("tv_on: KEY_POWER then CEC HDMI %d for %s", hdmi_input, source)
                 tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
-                tv.send_key("KEY_POWERON")
+                tv.send_key("KEY_POWER")
                 tv.close()
                 while tv_power_state() != "on":
                     if time.monotonic() > deadline:
@@ -136,9 +135,9 @@ def tv_off(source: str) -> tuple[bool, str]:
             if source != "override" and active_source is not None and active_source != source:
                 log.debug("tv_off: ignoring, active source is %s not %s", active_source, source)
                 return True, f"TV in use by {active_source}"
-        log.debug("tv_off: KEY_POWEROFF for %s", source)
+        log.debug("tv_off: KEY_POWER for %s", source)
         tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
-        tv.send_key("KEY_POWEROFF")
+        tv.send_key("KEY_POWER")
         tv.close()
         with active_source_lock:
             active_source = None
