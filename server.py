@@ -9,7 +9,7 @@ connected to the TV via Ethernet and HDMI.
 Endpoints:
   GET  /tv/status        - Returns TV power state
   POST /tv/on            - Power on via WoL/WebSocket and switch HDMI input via CEC (JSON body: {"source": "<name>"})
-  POST /tv/off           - Turn TV off via WebSocket KEY_POWER (JSON body: {"source": "<name>"})
+  POST /tv/off           - Turn TV off via WebSocket KEY_POWEROFF (JSON body: {"source": "<name>"})
   POST /tv/key           - Send arbitrary key via WebSocket (JSON body: {"key": "KEY_..."})
 
 Usage:
@@ -109,9 +109,9 @@ def tv_on(source: str) -> tuple[bool, str]:
                     time.sleep(POWER_POLL_INTERVAL)
             state = tv_power_state()
             if state == "standby":
-                log.debug("tv_on: KEY_POWER then CEC HDMI %d for %s", hdmi_input, source)
+                log.debug("tv_on: KEY_POWERON then CEC HDMI %d for %s", hdmi_input, source)
                 tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
-                tv.send_key("KEY_POWER")
+                tv.send_key("KEY_POWERON")
                 tv.close()
                 while tv_power_state() != "on":
                     if time.monotonic() > deadline:
@@ -136,9 +136,9 @@ def tv_off(source: str) -> tuple[bool, str]:
             if source != "override" and active_source is not None and active_source != source:
                 log.debug("tv_off: ignoring, active source is %s not %s", active_source, source)
                 return True, f"TV in use by {active_source}"
-        log.debug("tv_off: KEY_POWER for %s", source)
+        log.debug("tv_off: KEY_POWEROFF for %s", source)
         tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
-        tv.send_key("KEY_POWER")
+        tv.send_key("KEY_POWEROFF")
         tv.close()
         with active_source_lock:
             active_source = None
