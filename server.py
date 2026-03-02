@@ -79,6 +79,7 @@ RC5_SPACE = 1
 
 amp_pi = pigpio.pi()
 amp_lock = threading.Lock()
+amp_rc5_toggle = 0
 if amp_pi.connected:
     amp_pi.set_mode(AMP_GPIO_PIN, pigpio.OUTPUT)
     amp_pi.write(AMP_GPIO_PIN, RC5_MARK)
@@ -98,17 +99,19 @@ def _rc5_manchester_bit(wf, bit):
 
 
 def amp_power_toggle():
-    """Send RC-5 power toggle (address=16, command=12) twice with flipped toggle bit."""
+    """Send RC-5 power toggle (address=16, command=12) twice with same toggle bit."""
+    global amp_rc5_toggle
     if amp_pi is None:
         log.warning("amp_power_toggle: pigpiod not connected, skipping")
         return
     log.debug("amp_power_toggle: sending RC-5 power command")
+    amp_rc5_toggle ^= 1
     with amp_lock:
-        for toggle in (0, 1):
-            bits = [1, 1, toggle]
+        for _ in range(2):
+            bits = [1, 1, amp_rc5_toggle]
             bits += [(16 >> i) & 1 for i in range(4, -1, -1)]
             bits += [(12 >> i) & 1 for i in range(5, -1, -1)]
-            log.debug("amp_power_toggle: toggle=%d bits=%s", toggle, bits)
+            log.debug("amp_power_toggle: toggle=%d bits=%s", amp_rc5_toggle, bits)
 
             wf = []
             for b in bits:
@@ -127,8 +130,8 @@ def amp_power_toggle():
             while amp_pi.wave_tx_busy():
                 time.sleep(0.001)
             amp_pi.wave_delete(wave_id)
-            log.debug("amp_power_toggle: toggle=%d sent (wave %d, %d pulses)", toggle, wave_id, len(wf))
-            time.sleep(0.09)
+            log.debug("amp_power_toggle: toggle=%d sent (wave %d, %d pulses)", amp_rc5_toggle, wave_id, len(wf))
+            time.sleep(0.1)
     log.debug("amp_power_toggle: done")
 
 # ---------------------------------------------------------------------------
