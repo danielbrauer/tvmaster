@@ -273,6 +273,15 @@ def tv_off_handler():
     return jsonify(ok=ok, message=message), status
 
 
+@app.route("/amp/toggle", methods=["POST"])
+def amp_toggle_handler():
+    try:
+        amp_power_toggle()
+        return jsonify(ok=True, message="Amp power toggled")
+    except Exception as e:
+        return jsonify(ok=False, message=str(e)), 500
+
+
 @app.route("/tv/key", methods=["POST"])
 def tv_key_handler():
     if not request.is_json or "key" not in request.json:
