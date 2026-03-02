@@ -102,11 +102,13 @@ def amp_power_toggle():
     if amp_pi is None:
         log.warning("amp_power_toggle: pigpiod not connected, skipping")
         return
+    log.debug("amp_power_toggle: sending RC-5 power command")
     with amp_lock:
         for toggle in (0, 1):
             bits = [1, 1, toggle]
             bits += [(16 >> i) & 1 for i in range(4, -1, -1)]
             bits += [(12 >> i) & 1 for i in range(5, -1, -1)]
+            log.debug("amp_power_toggle: toggle=%d bits=%s", toggle, bits)
 
             wf = []
             for b in bits:
@@ -125,7 +127,9 @@ def amp_power_toggle():
             while amp_pi.wave_tx_busy():
                 time.sleep(0.001)
             amp_pi.wave_delete(wave_id)
+            log.debug("amp_power_toggle: toggle=%d sent (wave %d, %d pulses)", toggle, wave_id, len(wf))
             time.sleep(0.09)
+    log.debug("amp_power_toggle: done")
 
 # ---------------------------------------------------------------------------
 # TV control
