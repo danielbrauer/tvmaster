@@ -25,6 +25,7 @@ import threading
 import time
 
 import cec
+import pigpio
 import requests
 from flask import Flask, jsonify, request
 from samsungtvws import SamsungTVWS
@@ -67,6 +68,66 @@ active_source = None
 active_source_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
+# Amp control (Marantz PM6007 via RC-5 on GPIO 17)
+# ---------------------------------------------------------------------------
+
+AMP_GPIO_PIN = 17
+RC5_HALF_BIT = 889  # microseconds
+# Transistor inverts: GPIO LOW = wire HIGH (idle), GPIO HIGH = wire LOW
+RC5_MARK = 0
+RC5_SPACE = 1
+
+amp_pi = pigpio.pi()
+amp_lock = threading.Lock()
+if amp_pi.connected:
+    amp_pi.set_mode(AMP_GPIO_PIN, pigpio.OUTPUT)
+    amp_pi.write(AMP_GPIO_PIN, RC5_MARK)
+else:
+    log.warning("pigpiod not available — amp control disabled")
+    amp_pi = None
+
+
+def _rc5_manchester_bit(wf, bit):
+    first, second = (RC5_MARK, RC5_SPACE) if bit else (RC5_SPACE, RC5_MARK)
+    for level in (first, second):
+        wf.append(pigpio.pulse(
+            1 << AMP_GPIO_PIN if level else 0,
+            1 << AMP_GPIO_PIN if not level else 0,
+            RC5_HALF_BIT,
+        ))
+
+
+def amp_power_toggle():
+    """Send RC-5 power toggle (address=16, command=12) twice with flipped toggle bit."""
+    if amp_pi is None:
+        log.warning("amp_power_toggle: pigpiod not connected, skipping")
+        return
+    with amp_lock:
+        for toggle in (0, 1):
+            bits = [1, 1, toggle]
+            bits += [(16 >> i) & 1 for i in range(4, -1, -1)]
+            bits += [(12 >> i) & 1 for i in range(5, -1, -1)]
+
+            wf = []
+            for b in bits:
+                _rc5_manchester_bit(wf, b)
+            # Idle suffix so last transition is clean
+            wf.append(pigpio.pulse(
+                1 << AMP_GPIO_PIN if RC5_MARK else 0,
+                1 << AMP_GPIO_PIN if not RC5_MARK else 0,
+                RC5_HALF_BIT * 4,
+            ))
+
+            amp_pi.wave_clear()
+            amp_pi.wave_add_generic(wf)
+            wave_id = amp_pi.wave_create()
+            amp_pi.wave_send_once(wave_id)
+            while amp_pi.wave_tx_busy():
+                time.sleep(0.001)
+            amp_pi.wave_delete(wave_id)
+            time.sleep(0.09)
+
+# ---------------------------------------------------------------------------
 # TV control
 # ---------------------------------------------------------------------------
 
@@ -98,6 +159,7 @@ def tv_on(source: str) -> tuple[bool, str]:
         state = tv_power_state()
         if state == "on":
             log.debug("tv_on: already on, CEC HDMI %d for %s", hdmi_input, source)
+            amp_power_toggle()
         else:
             deadline = time.monotonic() + POWER_POLL_TIMEOUT
             if state == "unreachable":
@@ -116,6 +178,7 @@ def tv_on(source: str) -> tuple[bool, str]:
                     if time.monotonic() > deadline:
                         return False, "Timed out waiting for TV to turn on"
                     time.sleep(POWER_POLL_INTERVAL)
+            amp_power_toggle()
         cec_set_active_source(hdmi_input)
         with active_source_lock:
             active_source = source
@@ -139,6 +202,7 @@ def tv_off(source: str) -> tuple[bool, str]:
         tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
         tv.send_key("KEY_POWER")
         tv.close()
+        amp_power_toggle()
         with active_source_lock:
             active_source = None
         return True, "TV turned off"

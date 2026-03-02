@@ -3,3 +3,4 @@ samsungtvws
 cec
 requests
 wakeonlan
+pigpio
