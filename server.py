@@ -99,7 +99,7 @@ def _rc5_manchester_bit(wf, bit):
 
 
 def amp_power_toggle():
-    """Send RC-5 power toggle (address=16, command=12) twice with same toggle bit."""
+    """Send RC-5 power toggle (address=16, command=12)."""
     global amp_rc5_toggle
     if amp_pi is None:
         log.warning("amp_power_toggle: pigpiod not connected, skipping")
@@ -107,31 +107,29 @@ def amp_power_toggle():
     log.debug("amp_power_toggle: sending RC-5 power command")
     amp_rc5_toggle ^= 1
     with amp_lock:
-        for _ in range(2):
-            bits = [1, 1, amp_rc5_toggle]
-            bits += [(16 >> i) & 1 for i in range(4, -1, -1)]
-            bits += [(12 >> i) & 1 for i in range(5, -1, -1)]
-            log.debug("amp_power_toggle: toggle=%d bits=%s", amp_rc5_toggle, bits)
+        bits = [1, 1, amp_rc5_toggle]
+        bits += [(16 >> i) & 1 for i in range(4, -1, -1)]
+        bits += [(12 >> i) & 1 for i in range(5, -1, -1)]
+        log.debug("amp_power_toggle: toggle=%d bits=%s", amp_rc5_toggle, bits)
 
-            wf = []
-            for b in bits:
-                _rc5_manchester_bit(wf, b)
-            # Idle suffix so last transition is clean
-            wf.append(pigpio.pulse(
-                1 << AMP_GPIO_PIN if RC5_MARK else 0,
-                1 << AMP_GPIO_PIN if not RC5_MARK else 0,
-                RC5_HALF_BIT * 4,
-            ))
+        wf = []
+        for b in bits:
+            _rc5_manchester_bit(wf, b)
+        # Idle suffix so last transition is clean
+        wf.append(pigpio.pulse(
+            1 << AMP_GPIO_PIN if RC5_MARK else 0,
+            1 << AMP_GPIO_PIN if not RC5_MARK else 0,
+            RC5_HALF_BIT * 4,
+        ))
 
-            amp_pi.wave_clear()
-            amp_pi.wave_add_generic(wf)
-            wave_id = amp_pi.wave_create()
-            amp_pi.wave_send_once(wave_id)
-            while amp_pi.wave_tx_busy():
-                time.sleep(0.001)
-            amp_pi.wave_delete(wave_id)
-            log.debug("amp_power_toggle: toggle=%d sent (wave %d, %d pulses)", amp_rc5_toggle, wave_id, len(wf))
-            time.sleep(0.1)
+        amp_pi.wave_clear()
+        amp_pi.wave_add_generic(wf)
+        wave_id = amp_pi.wave_create()
+        amp_pi.wave_send_once(wave_id)
+        while amp_pi.wave_tx_busy():
+            time.sleep(0.001)
+        amp_pi.wave_delete(wave_id)
+        log.debug("amp_power_toggle: sent (wave %d, %d pulses)", wave_id, len(wf))
     log.debug("amp_power_toggle: done")
 
 # ---------------------------------------------------------------------------
