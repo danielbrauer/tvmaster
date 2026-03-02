@@ -25,7 +25,7 @@ import threading
 import time
 
 import cec
-import lgpio
+import pigpio
 import requests
 from flask import Flask, jsonify, request
 from samsungtvws import SamsungTVWS
@@ -72,69 +72,63 @@ active_source_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 AMP_GPIO_PIN = 17
-RC5_HALF_BIT = 889e-6  # seconds
+RC5_HALF_BIT = 889  # microseconds
 # Transistor inverts: GPIO LOW = wire HIGH (idle), GPIO HIGH = wire LOW
 RC5_MARK = 0
 RC5_SPACE = 1
 
-try:
-    amp_chip = lgpio.gpiochip_open(0)
-    lgpio.gpio_claim_output(amp_chip, AMP_GPIO_PIN, RC5_MARK)
-except Exception:
-    log.warning("GPIO not available — amp control disabled")
-    amp_chip = None
-
+amp_pi = pigpio.pi()
 amp_lock = threading.Lock()
+if amp_pi.connected:
+    amp_pi.set_mode(AMP_GPIO_PIN, pigpio.OUTPUT)
+    amp_pi.write(AMP_GPIO_PIN, RC5_MARK)
+else:
+    log.warning("pigpiod not available — amp control disabled")
+    amp_pi = None
 
 
-def _busy_wait(seconds):
-    deadline = time.perf_counter() + seconds
-    while time.perf_counter() < deadline:
-        pass
+def _rc5_manchester_bit(wf, bit):
+    first, second = (RC5_MARK, RC5_SPACE) if bit else (RC5_SPACE, RC5_MARK)
+    for level in (first, second):
+        wf.append(pigpio.pulse(
+            1 << AMP_GPIO_PIN if level else 0,
+            1 << AMP_GPIO_PIN if not level else 0,
+            RC5_HALF_BIT,
+        ))
 
 
 def amp_power_toggle():
-    """Send RC-5 power toggle (address=16, command=12). Two packets with flipped toggle as required by Marantz."""
-    if amp_chip is None:
-        log.warning("amp_power_toggle: GPIO not available, skipping")
+    """Send RC-5 power toggle (address=16, command=12) twice with flipped toggle bit."""
+    if amp_pi is None:
+        log.warning("amp_power_toggle: pigpiod not connected, skipping")
         return
     log.debug("amp_power_toggle: sending RC-5 power command")
     with amp_lock:
-        # Use real-time scheduling for consistent timing
-        original_policy = os.sched_getscheduler(0)
-        original_param = os.sched_getparam(0)
-        try:
-            os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(1))
-        except PermissionError:
-            log.debug("amp_power_toggle: could not set SCHED_FIFO, continuing without")
+        for toggle in (0, 1):
+            bits = [1, 1, toggle]
+            bits += [(16 >> i) & 1 for i in range(4, -1, -1)]
+            bits += [(12 >> i) & 1 for i in range(5, -1, -1)]
+            log.debug("amp_power_toggle: toggle=%d bits=%s", toggle, bits)
 
-        try:
-            for toggle in (0, 1):
-                bits = [1, 1, toggle]
-                bits += [(16 >> i) & 1 for i in range(4, -1, -1)]
-                bits += [(12 >> i) & 1 for i in range(5, -1, -1)]
-                log.debug("amp_power_toggle: toggle=%d bits=%s", toggle, bits)
+            wf = []
+            for b in bits:
+                _rc5_manchester_bit(wf, b)
+            # Idle suffix so last transition is clean
+            wf.append(pigpio.pulse(
+                1 << AMP_GPIO_PIN if RC5_MARK else 0,
+                1 << AMP_GPIO_PIN if not RC5_MARK else 0,
+                RC5_HALF_BIT * 4,
+            ))
 
-                for bit in bits:
-                    # Manchester: 1 = mark→space, 0 = space→mark
-                    if bit:
-                        lgpio.gpio_write(amp_chip, AMP_GPIO_PIN, RC5_MARK)
-                        _busy_wait(RC5_HALF_BIT)
-                        lgpio.gpio_write(amp_chip, AMP_GPIO_PIN, RC5_SPACE)
-                        _busy_wait(RC5_HALF_BIT)
-                    else:
-                        lgpio.gpio_write(amp_chip, AMP_GPIO_PIN, RC5_SPACE)
-                        _busy_wait(RC5_HALF_BIT)
-                        lgpio.gpio_write(amp_chip, AMP_GPIO_PIN, RC5_MARK)
-                        _busy_wait(RC5_HALF_BIT)
-
-                # Idle suffix so last transition is clean
-                lgpio.gpio_write(amp_chip, AMP_GPIO_PIN, RC5_MARK)
-                _busy_wait(RC5_HALF_BIT * 4)
-                log.debug("amp_power_toggle: toggle=%d sent", toggle)
-                time.sleep(0.09)
-        finally:
-            os.sched_setscheduler(0, original_policy, original_param)
+            amp_pi.wave_clear()
+            amp_pi.wave_add_generic(wf)
+            wave_id = amp_pi.wave_create()
+            amp_pi.wave_send_once(wave_id)
+            while amp_pi.wave_tx_busy():
+                time.sleep(0.001)
+            amp_pi.wave_delete(wave_id)
+            log.debug("amp_power_toggle: toggle=%d sent (wave %d, %d pulses)", toggle, wave_id, len(wf))
+            time.sleep(0.09)
     log.debug("amp_power_toggle: done")
 
 # ---------------------------------------------------------------------------
