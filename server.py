@@ -73,9 +73,9 @@ active_source_lock = threading.Lock()
 
 AMP_GPIO_PIN = 17
 RC5_HALF_BIT = 889  # microseconds
-# Transistor inverts: GPIO LOW = wire HIGH (idle), GPIO HIGH = wire LOW
-RC5_MARK = 0
-RC5_SPACE = 1
+# Transistor inverts: GPIO HIGH = wire LOW, GPIO LOW = wire HIGH
+RC5_MARK = 1
+RC5_SPACE = 0
 
 amp_pi = pigpio.pi()
 amp_lock = threading.Lock()
