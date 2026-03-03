@@ -74,26 +74,25 @@ active_source_lock = threading.Lock()
 AMP_GPIO_PIN = 17
 RC5_HALF_BIT = 889  # microseconds
 # Transistor inverts: GPIO LOW = wire HIGH (idle), GPIO HIGH = wire LOW
-RC5_MARK = 0
-RC5_SPACE = 1
 
 amp_pi = pigpio.pi()
 amp_lock = threading.Lock()
 amp_rc5_toggle = 0
 if amp_pi.connected:
     amp_pi.set_mode(AMP_GPIO_PIN, pigpio.OUTPUT)
-    amp_pi.write(AMP_GPIO_PIN, RC5_MARK)
+    amp_pi.write(AMP_GPIO_PIN, 0)
 else:
     log.warning("pigpiod not available — amp control disabled")
     amp_pi = None
 
 
 def _rc5_manchester_bit(wf, bit):
-    first, second = (RC5_MARK, RC5_SPACE) if bit else (RC5_SPACE, RC5_MARK)
-    for level in (first, second):
+    # RC-5 Manchester: bit 1 = GPIO LOW then HIGH, bit 0 = GPIO HIGH then LOW
+    first, second = (0, 1) if bit else (1, 0)
+    for gpio_level in (first, second):
         wf.append(pigpio.pulse(
-            1 << AMP_GPIO_PIN if level else 0,
-            1 << AMP_GPIO_PIN if not level else 0,
+            1 << AMP_GPIO_PIN if gpio_level else 0,
+            1 << AMP_GPIO_PIN if not gpio_level else 0,
             RC5_HALF_BIT,
         ))
 
@@ -107,7 +106,9 @@ def amp_power_toggle():
     log.debug("amp_power_toggle: sending RC-5 power command")
     amp_rc5_toggle ^= 1
     with amp_lock:
-        for _ in range(2):
+        for repeat in range(2):
+            amp_pi.write(AMP_GPIO_PIN, 0)  # reset to idle before transmission
+
             bits = [1, 1, amp_rc5_toggle]
             bits += [(16 >> i) & 1 for i in range(4, -1, -1)]
             bits += [(12 >> i) & 1 for i in range(5, -1, -1)]
@@ -116,12 +117,6 @@ def amp_power_toggle():
             wf = []
             for b in bits:
                 _rc5_manchester_bit(wf, b)
-            # Idle suffix so last transition is clean
-            wf.append(pigpio.pulse(
-                1 << AMP_GPIO_PIN if RC5_MARK else 0,
-                1 << AMP_GPIO_PIN if not RC5_MARK else 0,
-                RC5_HALF_BIT * 4,
-            ))
 
             amp_pi.wave_clear()
             amp_pi.wave_add_generic(wf)
@@ -130,8 +125,10 @@ def amp_power_toggle():
             while amp_pi.wave_tx_busy():
                 time.sleep(0.001)
             amp_pi.wave_delete(wave_id)
+            amp_pi.write(AMP_GPIO_PIN, 0)  # return to idle after transmission
             log.debug("amp_power_toggle: toggle=%d sent (wave %d, %d pulses)", amp_rc5_toggle, wave_id, len(wf))
-            time.sleep(0.1)
+            if repeat == 0:
+                time.sleep(0.1)
     log.debug("amp_power_toggle: done")
 
 # ---------------------------------------------------------------------------
