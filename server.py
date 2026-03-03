@@ -12,6 +12,7 @@ Endpoints:
   POST /tv/off           - Turn TV off via WebSocket KEY_POWER (JSON body: {"source": "<name>"})
   POST /tv/key           - Send arbitrary key via WebSocket (JSON body: {"key": "KEY_..."})
   POST /amp/on           - Send discrete power on to amp via RC5-X
+  POST /amp/toggle       - Toggle amp power via RC-5
 
 Usage:
   python3 server.py
@@ -144,6 +145,31 @@ def _send_rc5x(address, command, extension, label="rc5x"):
     for b in payload:
         _rc5_manchester_bit(wf, b)
     _send_rc5_waveform(wf, label)
+
+
+def _send_rc5(address, command, label="rc5"):
+    """Send standard 14-bit RC-5 command.
+
+    Format: S1 + S2 + toggle + address(5) + command(6)
+    """
+    global amp_rc5_toggle
+    if amp_pi is None:
+        log.warning("%s: pigpiod not connected, skipping", label)
+        return
+    amp_rc5_toggle ^= 1
+    bits = [1, 1, amp_rc5_toggle]
+    bits += [(address >> i) & 1 for i in range(4, -1, -1)]
+    bits += [(command >> i) & 1 for i in range(5, -1, -1)]
+    log.debug("%s: toggle=%d bits=%s", label, amp_rc5_toggle, bits)
+    wf = []
+    for b in bits:
+        _rc5_manchester_bit(wf, b)
+    _send_rc5_waveform(wf, label)
+
+
+def amp_power_toggle():
+    """Send RC-5 power toggle (address=16, command=12)."""
+    _send_rc5(16, 12, label="amp_power_toggle")
 
 
 def amp_power_on():
@@ -307,6 +333,15 @@ def amp_on_handler():
     try:
         amp_power_on()
         return jsonify(ok=True, message="Amp power on")
+    except Exception as e:
+        return jsonify(ok=False, message=str(e)), 500
+
+
+@app.route("/amp/toggle", methods=["POST"])
+def amp_toggle_handler():
+    try:
+        amp_power_toggle()
+        return jsonify(ok=True, message="Amp power toggled")
     except Exception as e:
         return jsonify(ok=False, message=str(e)), 500
 
