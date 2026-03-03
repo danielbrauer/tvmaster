@@ -11,6 +11,7 @@ Endpoints:
   POST /tv/on            - Power on via WoL/WebSocket and switch HDMI input via CEC (JSON body: {"source": "<name>"})
   POST /tv/off           - Turn TV off via WebSocket KEY_POWER (JSON body: {"source": "<name>"})
   POST /tv/key           - Send arbitrary key via WebSocket (JSON body: {"key": "KEY_..."})
+  POST /amp/on           - Send discrete power on to amp via RC5-X
 
 Usage:
   python3 server.py
@@ -97,27 +98,11 @@ def _rc5_manchester_bit(wf, bit):
         ))
 
 
-def amp_power_toggle():
-    """Send RC-5 power toggle (address=16, command=12) twice with same toggle bit."""
-    global amp_rc5_toggle
-    if amp_pi is None:
-        log.warning("amp_power_toggle: pigpiod not connected, skipping")
-        return
-    log.debug("amp_power_toggle: sending RC-5 power command")
-    amp_rc5_toggle ^= 1
+def _send_rc5_waveform(wf, label):
+    """Send a prebuilt RC-5 waveform twice with 100ms delay between."""
     with amp_lock:
         for repeat in range(2):
             amp_pi.write(AMP_GPIO_PIN, 0)  # reset to idle before transmission
-
-            bits = [1, 1, amp_rc5_toggle]
-            bits += [(16 >> i) & 1 for i in range(4, -1, -1)]
-            bits += [(12 >> i) & 1 for i in range(5, -1, -1)]
-            log.debug("amp_power_toggle: toggle=%d bits=%s", amp_rc5_toggle, bits)
-
-            wf = []
-            for b in bits:
-                _rc5_manchester_bit(wf, b)
-
             amp_pi.wave_clear()
             amp_pi.wave_add_generic(wf)
             wave_id = amp_pi.wave_create()
@@ -126,10 +111,45 @@ def amp_power_toggle():
                 time.sleep(0.001)
             amp_pi.wave_delete(wave_id)
             amp_pi.write(AMP_GPIO_PIN, 0)  # return to idle after transmission
-            log.debug("amp_power_toggle: toggle=%d sent (wave %d, %d pulses)", amp_rc5_toggle, wave_id, len(wf))
+            log.debug("%s: sent (wave %d, %d pulses)", label, wave_id, len(wf))
             if repeat == 0:
                 time.sleep(0.1)
-    log.debug("amp_power_toggle: done")
+
+
+def _send_rc5x(address, command, extension, label="rc5x"):
+    """Send 20-bit RC5-X (Marantz extended) command.
+
+    Format: S1 + S2 + toggle + address(5) + [3556us pause] + command(6) + extension(6)
+    """
+    global amp_rc5_toggle
+    if amp_pi is None:
+        log.warning("%s: pigpiod not connected, skipping", label)
+        return
+    amp_rc5_toggle ^= 1
+    header = [1, 1, amp_rc5_toggle]
+    header += [(address >> i) & 1 for i in range(4, -1, -1)]
+    payload = [(command >> i) & 1 for i in range(5, -1, -1)]
+    payload += [(extension >> i) & 1 for i in range(5, -1, -1)]
+    log.debug("%s: toggle=%d bits=%s + %s", label, amp_rc5_toggle, header, payload)
+    wf = []
+    for b in header:
+        _rc5_manchester_bit(wf, b)
+    # 4x half-bit pause at idle (GPIO LOW) between header and payload
+    wf.append(pigpio.pulse(0, 1 << AMP_GPIO_PIN, RC5_HALF_BIT * 4))
+    for b in payload:
+        _rc5_manchester_bit(wf, b)
+    _send_rc5_waveform(wf, label)
+
+
+def amp_power_on():
+    """Send RC5-X discrete power on (address=16, command=12, extension=1)."""
+    _send_rc5x(16, 12, 1, label="amp_power_on")
+
+
+def amp_power_off():
+    """Send RC5-X discrete power off (address=16, command=12, extension=2)."""
+    _send_rc5x(16, 12, 2, label="amp_power_off")
+
 
 # ---------------------------------------------------------------------------
 # TV control
@@ -163,7 +183,7 @@ def tv_on(source: str) -> tuple[bool, str]:
         state = tv_power_state()
         if state == "on":
             log.debug("tv_on: already on, CEC HDMI %d for %s", hdmi_input, source)
-            amp_power_toggle()
+            amp_power_on()
         else:
             deadline = time.monotonic() + POWER_POLL_TIMEOUT
             if state == "unreachable":
@@ -182,7 +202,7 @@ def tv_on(source: str) -> tuple[bool, str]:
                     if time.monotonic() > deadline:
                         return False, "Timed out waiting for TV to turn on"
                     time.sleep(POWER_POLL_INTERVAL)
-            amp_power_toggle()
+            amp_power_on()
         cec_set_active_source(hdmi_input)
         with active_source_lock:
             active_source = source
@@ -206,7 +226,7 @@ def tv_off(source: str) -> tuple[bool, str]:
         tv = SamsungTVWS(host=TV_IP, port=8002, token_file=TV_TOKEN_FILE, name="TVMaster")
         tv.send_key("KEY_POWER")
         tv.close()
-        amp_power_toggle()
+        amp_power_off()
         with active_source_lock:
             active_source = None
         return True, "TV turned off"
@@ -277,11 +297,11 @@ def tv_off_handler():
     return jsonify(ok=ok, message=message), status
 
 
-@app.route("/amp/toggle", methods=["POST"])
-def amp_toggle_handler():
+@app.route("/amp/on", methods=["POST"])
+def amp_on_handler():
     try:
-        amp_power_toggle()
-        return jsonify(ok=True, message="Amp power toggled")
+        amp_power_on()
+        return jsonify(ok=True, message="Amp power on")
     except Exception as e:
         return jsonify(ok=False, message=str(e)), 500
 
