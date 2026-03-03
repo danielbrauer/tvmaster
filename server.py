@@ -74,22 +74,23 @@ active_source_lock = threading.Lock()
 
 AMP_GPIO_PIN = 17
 RC5_HALF_BIT = 889  # microseconds
-# Transistor inverts: GPIO LOW = wire HIGH (idle), GPIO HIGH = wire LOW
+# Direct connection (no transistor)
+GPIO_TO_SIGNAL_HIGH = 1
+GPIO_TO_SIGNAL_LOW = 0
 
 amp_pi = pigpio.pi()
 amp_lock = threading.Lock()
 amp_rc5_toggle = 0
 if amp_pi.connected:
     amp_pi.set_mode(AMP_GPIO_PIN, pigpio.OUTPUT)
-    amp_pi.write(AMP_GPIO_PIN, 0)
+    amp_pi.write(AMP_GPIO_PIN, GPIO_TO_SIGNAL_HIGH)
 else:
     log.warning("pigpiod not available — amp control disabled")
     amp_pi = None
 
 
 def _rc5_manchester_bit(wf, bit):
-    # RC-5 Manchester: bit 1 = GPIO LOW then HIGH, bit 0 = GPIO HIGH then LOW
-    first, second = (0, 1) if bit else (1, 0)
+    first, second = (GPIO_TO_SIGNAL_LOW, GPIO_TO_SIGNAL_HIGH) if bit else (GPIO_TO_SIGNAL_HIGH, GPIO_TO_SIGNAL_LOW)
     for gpio_level in (first, second):
         wf.append(pigpio.pulse(
             1 << AMP_GPIO_PIN if gpio_level else 0,
@@ -102,7 +103,7 @@ def _send_rc5_waveform(wf, label):
     """Send a prebuilt RC-5 waveform twice with 100ms delay between."""
     with amp_lock:
         for repeat in range(2):
-            amp_pi.write(AMP_GPIO_PIN, 0)  # reset to idle before transmission
+            amp_pi.write(AMP_GPIO_PIN, GPIO_TO_SIGNAL_HIGH)  # idle
             amp_pi.wave_clear()
             amp_pi.wave_add_generic(wf)
             wave_id = amp_pi.wave_create()
@@ -110,7 +111,7 @@ def _send_rc5_waveform(wf, label):
             while amp_pi.wave_tx_busy():
                 time.sleep(0.001)
             amp_pi.wave_delete(wave_id)
-            amp_pi.write(AMP_GPIO_PIN, 0)  # return to idle after transmission
+            amp_pi.write(AMP_GPIO_PIN, GPIO_TO_SIGNAL_HIGH)  # idle
             log.debug("%s: sent (wave %d, %d pulses)", label, wave_id, len(wf))
             if repeat == 0:
                 time.sleep(0.1)
@@ -134,8 +135,12 @@ def _send_rc5x(address, command, extension, label="rc5x"):
     wf = []
     for b in header:
         _rc5_manchester_bit(wf, b)
-    # 4x half-bit pause at idle (GPIO LOW) between header and payload
-    wf.append(pigpio.pulse(0, 1 << AMP_GPIO_PIN, RC5_HALF_BIT * 4))
+    # 4x half-bit pause at idle between header and payload
+    wf.append(pigpio.pulse(
+        1 << AMP_GPIO_PIN if GPIO_TO_SIGNAL_HIGH else 0,
+        1 << AMP_GPIO_PIN if GPIO_TO_SIGNAL_LOW else 0,
+        RC5_HALF_BIT * 4,
+    ))
     for b in payload:
         _rc5_manchester_bit(wf, b)
     _send_rc5_waveform(wf, label)
